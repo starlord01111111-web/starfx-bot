@@ -1,7 +1,3 @@
-yfinance
-requests
+python-telegram-bot==20.7
 flask
-pandas
-matplotlib
-pytz
-numpy
+requests
