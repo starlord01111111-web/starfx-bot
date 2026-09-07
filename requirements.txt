@@ -1,2 +1,7 @@
+yfinance
 requests
 flask
+pandas
+matplotlib
+pytz
+numpy
