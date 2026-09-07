@@ -2,3 +2,4 @@ python-telegram-bot
 flask
 requests
 yfinance
+matplotlib
