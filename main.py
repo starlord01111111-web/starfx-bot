@@ -1,3 +1,17 @@
+import os
+from flask import Flask
+import threading
+
+app = Flask(__name__)
+@app.route('/')
+def home():
+    return "StarFX V7.3 Gold Bot is Live! ✅"
+
+def run_web():
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
+
+threading.Thread(target=run_web, daemon=True).start()
 from flask import Flask
 import threading, time, os, yfinance as yf, json
 import pandas as pd, numpy as np, requests, pytz
