@@ -1,215 +1,130 @@
-import os, time, threading, requests, yfinance as yf, pandas as pd
-from flask import Flask
+import os, time, threading, pytz, yfinance as yf, pandas as pd
 from datetime import datetime
-import pytz
+from apscheduler.schedulers.background import BackgroundScheduler
+import requests
 
-BOT_TOKEN = "8656945768:AAE4-rNQ6EDm7wPNorQctAXWfcSYkCv1b2U"
+TELEGRAM_TOKEN = "8656945768:AAE4-rNQ6EDm7wPNorQctAXWfcSYkCv1b2U"
 CHAT_ID = "-1004365660319"
-EAT = pytz.timezone('Africa/Nairobi')
+EAT = pytz.timezone('Africa/Kampala')
 
-SYMBOLS = {"GOLD": "GC=F", "GBPUSD": "GBPUSD=X", "BTCUSD": "BTC-USD"}
+SYMBOLS = {"GOLD": "GC=F", "GBPUSD": "GBPUSD=X", "BTCUSD": "BTC-USD", "EURUSD": "EURUSD=X"}
 
-app = Flask(__name__)
-@app.route('/')
-def home(): return "StarFx V7.9.2 FAST FIX LIVE"
-
+active_trades = []
 last_signal_time = {}
-signals_history = []
-major_news_cache = []
-last_news_fetch = 0
+today_signals = []
+a_plus_count = 0
 
-def send_telegram(msg, chat_id=None):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    try: requests.post(url, json={"chat_id": chat_id or CHAT_ID, "text": msg, "parse_mode": "Markdown"}, timeout=15)
+def send_telegram(msg):
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        requests.post(url, data={"chat_id": CHAT_ID, "text": msg}, timeout=10)
     except: pass
 
-def get_data(symbol, interval, period):
+def get_data(ticker, period="5d", interval="15m"):
     try:
-        df = yf.download(symbol, period=period, interval=interval, progress=False, auto_adjust=True)
-        if hasattr(df.columns, 'get_level_values'):
-            try: df.columns = df.columns.get_level_values(0)
-            except: pass
-        df.dropna(inplace=True)
+        df = yf.download(ticker, period=period, interval=interval, progress=False)
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
         return df
-    except: return pd.DataFrame()
+    except: return None
 
-def get_price_now(sym):
-    df = get_data(sym, "1m", "1d")
-    return float(df['Close'].iloc[-1]) if not df.empty else None
+def detect_structure(df):
+    if df is None or len(df) < 30: return "RANGING", None
+    last_close = df['Close'].iloc[-1]
+    prev_high = df['High'].iloc[-25:-5].max()
+    prev_low = df['Low'].iloc[-25:-5].min()
+    if last_close > prev_high * 1.0002: return "BULLISH BOS", "BUY"
+    elif last_close < prev_low * 0.9998: return "BEARISH BOS", "SELL"
+    else: return "RANGING", None
 
-def detect_bos_choch(df):
-    if len(df) < 20: return "RANGING"
-    highs = df['High'].rolling(10).max()
-    lows = df['Low'].rolling(10).min()
-    last = df['Close'].iloc[-1]
-    if last > highs.iloc[-20]: return "BULLISH BOS"
-    if last < lows.iloc[-20]: return "BEARISH BOS"
-    return "RANGING"
+def detect_confirmation(df):
+    last = df.iloc[-1]; prev = df.iloc[-2]
+    body = abs(last['Close'] - last['Open'])
+    rng = last['High'] - last['Low']
+    wick_down = min(last['Close'], last['Open']) - last['Low']
+    wick_up = last['High'] - max(last['Close'], last['Open'])
+    # ENGULFING
+    if last['Close'] > last['Open'] and prev['Close'] < prev['Open']:
+        if last['Close'] > prev['Open'] and last['Open'] < prev['Close']:
+            return "BULLISH ENGULFING", "BUY"
+    if last['Close'] < last['Open'] and prev['Close'] > prev['Open']:
+        if last['Close'] < prev['Open'] and last['Open'] > prev['Close']:
+            return "BEARISH ENGULFING", "SELL"
+    if wick_down > body * 1.5: return "BULLISH PIN", "BUY"
+    if wick_up > body * 1.5: return "BEARISH PIN", "SELL"
+    if rng > 0 and body / rng > 0.6:
+        return ("BULLISH MOMENTUM" if last['Close'] > last['Open'] else "BEARISH MOMENTUM"), ("BUY" if last['Close'] > last['Open'] else "SELL")
+    return None, None
 
-def detect_engulfing(df):
-    if len(df) < 3: return None
-    prev, curr = df.iloc[-2], df.iloc[-1]
-    if curr['Close'] > curr['Open'] and prev['Close'] < prev['Open']:
-        if curr['Close'] > prev['Open']: return "BULLISH ENGULFING"
-    if curr['Close'] < curr['Open'] and prev['Close'] > prev['Open']:
-        if curr['Close'] < prev['Open']: return "BEARISH ENGULFING"
-    return None
+def calculate_levels(entry, side, symbol, df):
+    atr = (df['High'] - df['Low']).tail(14).mean()
+    if symbol == "GOLD": sl_dist = max(30.0, atr * 1.5)
+    elif symbol == "BTCUSD": sl_dist = max(350, atr * 1.5)
+    else: sl_dist = max(0.0008, atr * 1.5)
+    if side == "BUY": sl = entry - sl_dist; tp1 = entry + sl_dist*2; tp2 = entry + sl_dist*3
+    else: sl = entry + sl_dist; tp1 = entry - sl_dist*2; tp2 = entry - sl_dist*3
+    return sl, tp1, tp2
 
-def detect_pinbar(df):
-    if len(df) < 2: return None
-    c = df.iloc[-1]
-    body = abs(c['Close'] - c['Open'])
-    if body==0: return None
-    wick_lower = min(c['Close'], c['Open']) - c['Low']
-    wick_upper = c['High'] - max(c['Close'], c['Open'])
-    if wick_lower > body*1.5: return "BULLISH PIN"
-    if wick_upper > body*1.5: return "BEARISH PIN"
-    return None
-
-def is_london_ny_session():
+def scan():
+    global a_plus_count
     now = datetime.now(EAT)
-    return 10 <= now.hour < 23
+    if now.hour < 10 or now.hour >= 23: return
+    for name, ticker in SYMBOLS.items():
+        df = get_data(ticker);
+        if df is None: continue
+        struct, struct_side = detect_structure(df)
+        conf, conf_side = detect_confirmation(df)
+        if conf is None: continue
+        side = conf_side
+        # FIX: BOS must match side
+        if "BULLISH BOS" in struct and side!= "BUY": continue
+        if "BEARISH BOS" in struct and side!= "SELL": continue
+        # FIX: 1 trade per symbol
+        if any(t['symbol']==name for t in active_trades): continue
+        # FIX: 60 min cooldown
+        if name in last_signal_time and time.time() - last_signal_time[name] < 3600: continue
+        # GRADE
+        if "BOS" in struct and "ENGULFING" in conf: grade = "A+ ⭐ SNIPER"
+        elif "BOS" in struct: grade = "A SNIPER"
+        else: grade = "B SCALP - RANGING"
+        entry = float(df['Close'].iloc[-1])
+        sl, tp1, tp2 = calculate_levels(entry, side, name, df)
+        emoji = "🟢" if side=="BUY" else "🔴"
+        msg = f"{emoji} {grade} - {name} {side} {emoji}\n\nEntry: {entry:.2f}\nSL: {sl:.2f}\nTP1: {tp1:.2f} (1:2)\nTP2: {tp2:.2f} (1:3)\n\n✅ {struct}\n✅ {conf}\n\n⏰ {now.strftime('%H:%M EAT FAST')}"
+        send_telegram(msg)
+        active_trades.append({'symbol':name,'side':side,'entry':entry,'sl':sl,'tp1':tp1,'tp2':tp2,'tp1_hit':False})
+        last_signal_time[name]=time.time(); today_signals.append(1)
+        if "A+" in grade: a_plus_count+=1
 
-def format_price(name, price):
-    return f"{price:.5f}" if name=="GBPUSD" else f"{price:.2f}"
-
-def fetch_major_news():
-    global major_news_cache, last_news_fetch
-    if time.time() - last_news_fetch < 1800 and major_news_cache:
-        return major_news_cache
-    try:
-        url = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
-        r = requests.get(url, timeout=10)
-        data = r.json()
-        high = []
-        for n in data:
-            if n.get('impact') == 'High' and n.get('currency') in ['USD','GBP']:
-                high.append(n)
-        major_news_cache = high[-10:]
-        last_news_fetch = time.time()
-        return major_news_cache
-    except:
-        return major_news_cache
-
-def get_upcoming_news_text():
-    news = fetch_major_news()
-    if not news: return "📰 No RED news this week - NFP/CPI done"
-    txt = "📰 *RED NEWS THIS WEEK*\n\n"
-    for n in news[-7:][::-1]:
-        txt += f"🔴 {n.get('currency')} - {n.get('title')}\n"
-    return txt
-
-def generate_signal(name, sym, is_pre_news=False):
-    global last_signal_time
-    if name in last_signal_time and time.time() - last_signal_time[name] < 1800:
-        return None
-    h4 = get_data(sym, "1h", "15d")
-    m15 = get_data(sym, "15m", "3d")
-    m5 = get_data(sym, "5m", "1d")
-    m1 = get_data(sym, "1m", "1d")
-    if h4.empty or m15.empty or m5.empty: return None
-
-    struct_h4 = detect_bos_choch(h4)
-    struct_m15 = detect_bos_choch(m15)
-    price = float(m1['Close'].iloc[-1]) if not m1.empty else float(m5['Close'].iloc[-1])
-    atr = float((m15['High'] - m15['Low']).rolling(14).mean().iloc[-1])
-
-    conf = detect_engulfing(m15) or detect_engulfing(m5) or detect_pinbar(m15) or detect_pinbar(m5)
-    if not conf:
-        last_m5 = m5.iloc[-1]
-        body = abs(last_m5['Close'] - last_m5['Open'])
-        rng = last_m5['High'] - last_m5['Low']
-        if rng>0 and body/rng>0.6:
-            conf = "BULLISH MOMENTUM" if last_m5['Close']>last_m5['Open'] else "BEARISH MOMENTUM"
-    if not conf: return None
-
-    if "BULLISH" in conf or "BULLISH" in struct_h4 or "BULLISH" in struct_m15:
-        sl = price - atr*1.5
-        risk = price - sl
-        if risk<=0: return None
-        last_signal_time[name]=time.time()
-        grade = "A+ ⭐" if "BOS" in struct_h4 else "A"
-        return {"pair":name,"action":"BUY","price":price,"sl":sl,"tp1":price+risk*2,"tp2":price+risk*3,"struct":struct_h4,"confirm":conf,"atr":atr,"pre_news":is_pre_news,"grade":grade}
-    if "BEARISH" in conf or "BEARISH" in struct_h4 or "BEARISH" in struct_m15:
-        sl = price + atr*1.5
-        risk = sl - price
-        if risk<=0: return None
-        last_signal_time[name]=time.time()
-        grade = "A+ ⭐" if "BOS" in struct_h4 else "A"
-        return {"pair":name,"action":"SELL","price":price,"sl":sl,"tp1":price-risk*2,"tp2":price-risk*3,"struct":struct_h4,"confirm":conf,"atr":atr,"pre_news":is_pre_news,"grade":grade}
-    return None
-
-def send_signal_message(sig):
-    emoji = "🟢" if sig['action']=="BUY" else "🔴"
-    pre = "⚠️ *PRE-NEWS* ⚠️\n" if sig.get('pre_news') else ""
-    txt = f"{pre}{emoji} *{sig['grade']} SNIPER - {sig['pair']} {sig['action']}* {emoji}\n\n*Entry:* `{format_price(sig['pair'], sig['price'])}`\n*SL:* `{format_price(sig['pair'], sig['sl'])}`\n*TP1:* `{format_price(sig['pair'], sig['tp1'])}` (1:2)\n*TP2:* `{format_price(sig['pair'], sig['tp2'])}` (1:3)\n\n✅ {sig['struct']}\n✅ {sig['confirm']}\n\n⏰ {datetime.now(EAT).strftime('%H:%M EAT')} FAST"
-    send_telegram(txt)
-    signals_history.append({"pair":sig['pair'],"action":sig['action'],"entry":sig['price'],"sl":sig['sl'],"tp2":sig['tp2'],"time":datetime.now(EAT).isoformat(),"result":"OPEN"})
-
-def auto_check_results():
-    for s in signals_history:
-        if s['result']!="OPEN": continue
-        price=get_price_now(SYMBOLS.get(s['pair']))
-        if not price: continue
-        if s['action']=="BUY":
-            if price>=s['tp2']: s['result']="WIN"; send_telegram(f"✅ *TP2 WIN* {s['pair']}")
-            elif price<=s['sl']: s['result']="LOSS"; send_telegram(f"❌ *SL LOSS* {s['pair']}")
-        else:
-            if price<=s['tp2']: s['result']="WIN"; send_telegram(f"✅ *TP2 WIN* {s['pair']}")
-            elif price>=s['sl']: s['result']="LOSS"; send_telegram(f"❌ *SL LOSS* {s['pair']}")
-
-def setup_menu():
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/setMyCommands"
-    cmds=[{"command":"start","description":"🚀 Start"},{"command":"signal","description":"🎯 Scan"},{"command":"price","description":"💰 Price"},{"command":"news","description":"📰 News"},{"command":"performance","description":"📊 WR"}]
-    try: requests.post(url, json={"commands":cmds}, timeout=10)
-    except: pass
-
-def command_listener():
-    offset=0
+def watcher():
     while True:
-        try:
-            r=requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates", params={"offset":offset,"timeout":25}, timeout=30).json()
-            if not r.get("ok"): time.sleep(3); continue
-            for upd in r.get("result",[]):
-                offset=upd["update_id"]+1
-                text=(upd.get("message",{}).get("text") or "").lower()
-                chat=upd.get("message",{}).get("chat",{}).get("id")
-                if not text: continue
-                if "/start" in text: send_telegram("🚀 *V7.9.2 FAST FIX LIVE* - Deploy SUCCESS! FAST 3-5/day", chat)
-                elif "/signal" in text:
-                    txt=f"🎯 {datetime.now(EAT).strftime('%H:%M')} {'🟢' if is_london_ny_session() else '🔴'}\n"
-                    for n,s in SYMBOLS.items():
-                        p=get_price_now(s)
-                        if p: txt+=f"{n}: {format_price(n,p)}\n"
-                    send_telegram(txt, chat)
-                elif "/price" in text:
-                    txt="💰 Live\n"
-                    for n,s in SYMBOLS.items():
-                        p=get_price_now(s)
-                        if p: txt+=f"{n}: {format_price(n,p)}\n"
-                    send_telegram(txt, chat)
-                elif "/news" in text: send_telegram(get_upcoming_news_text(), chat)
-                elif "/performance" in text:
-                    w=len([s for s in signals_history if s['result']=='WIN']); l=len([s for s in signals_history if s['result']=='LOSS'])
-                    send_telegram(f"📊 WR {(w/(w+l)*100) if w+l>0 else 0:.1f}% {w}W/{l}L", chat)
-        except: time.sleep(5)
+        time.sleep(60)
+        for t in active_trades[:]:
+            try:
+                df = yf.download(SYMBOLS[t['symbol']], period="1d", interval="1m", progress=False)
+                if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
+                price = float(df['Close'].iloc[-1]); hit=None
+                if t['side']=="BUY":
+                    if price <= t['sl']: hit=f"❌ SL HIT - {t['symbol']} BUY"
+                    elif price >= t['tp2']: hit=f"✅ TP2 WIN! {t['symbol']} BUY 1:3"
+                    elif price >= t['tp1'] and not t['tp1_hit']: hit=f"✅ TP1 WIN! {t['symbol']} BUY 1:2 - Move BE"; t['tp1_hit']=True; send_telegram(hit); continue
+                else:
+                    if price >= t['sl']: hit=f"❌ SL HIT - {t['symbol']} SELL"
+                    elif price <= t['tp2']: hit=f"✅ TP2 WIN! {t['symbol']} SELL 1:3"
+                    elif price <= t['tp1'] and not t['tp1_hit']: hit=f"✅ TP1 WIN! {t['symbol']} SELL 1:2 - Move BE"; t['tp1_hit']=True; send_telegram(hit); continue
+                if hit: send_telegram(hit); active_trades.remove(t)
+            except: pass
 
-def trading_loop():
-    while True:
-        try:
-            auto_check_results()
-            if is_london_ny_session():
-                for name,sym in SYMBOLS.items():
-                    sig=generate_signal(name,sym)
-                    if sig: send_signal_message(sig); time.sleep(2)
-            time.sleep(40)
-        except Exception as e:
-            print(e); time.sleep(60)
+def daily_report(): send_telegram(f"📊 DAILY REPORT 23:00 EAT\nSignals Today: {len(today_signals)}\nA+ Sniper: {a_plus_count}\nOpen: {len(active_trades)}")
+def weekly_report(): send_telegram("📈 WEEKLY REPORT - Sunday 23:30")
 
-setup_menu()
-threading.Thread(target=command_listener, daemon=True).start()
-threading.Thread(target=trading_loop, daemon=True).start()
+sched = BackgroundScheduler(timezone=EAT)
+sched.add_job(daily_report, 'cron', hour=23, minute=0)
+sched.add_job(weekly_report, 'cron', day_of_week='sun', hour=23, minute=30)
+sched.start()
 
-if __name__=="__main__":
-    send_telegram("🚀 *V7.9.2 FAST FIX LIVE* - Deploy FIXED! Ready for FAST signals!")
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+threading.Thread(target=watcher, daemon=True).start()
+send_telegram("🚀 V7.9.4 STABLE LIVE - Fixed BOS + Spam + SL/TP + 23:00 Report")
+while True:
+    try: scan(); time.sleep(40)
+    except: time.sleep(10)
