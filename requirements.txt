@@ -1,6 +1,5 @@
-Flask
 yfinance
-pandas
 requests
 pytz
-gunicorn
+APScheduler
+pandas
