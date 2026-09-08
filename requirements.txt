@@ -4,4 +4,3 @@ yfinance
 pandas
 numpy
 pytz
-matplotlib
