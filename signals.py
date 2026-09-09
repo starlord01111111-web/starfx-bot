@@ -225,3 +225,6 @@ class SignalEngine:
 
 
 engine = SignalEngine()
+def scan():
+    # Your existing scan code
+    pass
