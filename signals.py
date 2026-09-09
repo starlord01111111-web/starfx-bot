@@ -240,13 +240,19 @@ def scan():
         print("Trading not allowed.")
         return
 
-    for symbol in config.SYMBOLS:
+    for symbol, ticker in config.SYMBOLS.items():
 
-        print(f"Scanning {symbol}")
+    print(f"Scanning {symbol} ({ticker})")
 
-        try:
+    try:
 
-            data = market.get_all(symbol)
+        data = market.get_all(ticker)
+
+        
+
+        
+
+            
 
             if data is None:
                 print(f"No data for {symbol}")
