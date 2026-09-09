@@ -3,10 +3,12 @@ import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 from config import config
-from watcher import start_watcher
-from reports import start_scheduler
+from watcher import watcher
+from reports import reports
 from telegram_bot import telegram
-from signals import scan_loop
+from signals import while True:
+    # call your scan function here
+    time.sleep(config.SCAN_INTERVAL)
 
 
 class Handler(BaseHTTPRequestHandler):
