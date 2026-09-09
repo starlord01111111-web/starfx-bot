@@ -1,166 +1,53 @@
-import logging
-import signal
-import sys
+import os
 import threading
-import time
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 from config import config
-from data import market
-from database import db
-from reports import reports
-from risk import risk
-from signals import engine
+from watcher import start_watcher
+from reports import start_scheduler
 from telegram_bot import telegram
-from watcher import watcher
+from signals import scan_loop
 
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s",
-    filename=config.LOG_FILE
-)
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"StarFX V8.1 PRO is running")
 
-log = logging.getLogger(__name__)
-
-
-running = True
-
-
-# -------------------------------------------------
-# Validate configuration
-# -------------------------------------------------
-
-def validate():
-
-    if not config.TELEGRAM_TOKEN:
-        raise RuntimeError("Missing TELEGRAM_TOKEN")
-
-    if not config.CHAT_ID:
-        raise RuntimeError("Missing CHAT_ID")
+    def log_message(self, format, *args):
+        return
 
 
-# -------------------------------------------------
-# Shutdown
-# -------------------------------------------------
+def run_bot():
+    telegram.send(
+        """🚀 StarFX V8.1 PRO
 
-def stop(*_):
+✅ Scanner Online
+✅ Watcher Online
+✅ Reports Scheduled
+✅ Database Connected
 
-    global running
+Ready to scan.
+"""
+    )
 
-    running = False
+    start_scheduler()
 
-    watcher.running = False
+    threading.Thread(target=start_watcher, daemon=True).start()
 
-    telegram.send("🛑 Bot shutting down...")
-
-    sys.exit(0)
-
-
-signal.signal(signal.SIGINT, stop)
-signal.signal(signal.SIGTERM, stop)
-
-
-# -------------------------------------------------
-# Scanner
-# -------------------------------------------------
-
-def scan():
-
-    for symbol, ticker in config.SYMBOLS.items():
-
-        try:
-
-            if telegram.paused:
-                return
-
-            if not risk.trading_allowed():
-                return
-
-            if db.duplicate_trade(symbol):
-                continue
-
-            data = market.get_all(ticker)
-
-            if data is None:
-                continue
-
-            signal_data = engine.analyze(data)
-
-            if signal_data is None:
-                continue
-
-            if not db.cooldown_ok(
-                symbol,
-                signal_data["side"],
-                config.COOLDOWN_MIN
-            ):
-                continue
-
-            trade = risk.create_trade(
-                symbol,
-                signal_data
-            )
-
-            db.save_trade(trade)
-
-            db.register_signal(
-                symbol,
-                signal_data["side"]
-            )
-
-            telegram.signal(trade)
-
-            try:
-                telegram.send_chart(
-                    symbol,
-                    data["M15"]
-                )
-            except Exception:
-                log.exception(
-                    "Chart failed"
-                )
-
-        except Exception:
-
-            log.exception(
-                "Scan error"
-            )
-
-
-# -------------------------------------------------
-# Main
-# -------------------------------------------------
-
-def main():
-
-    validate()
-
-    reports.start()
-
-    threading.Thread(
-        target=watcher.loop,
-        daemon=True
-    ).start()
-
-    telegram.send("🚀 StarFX V8.0 PRO Started")
-
-    while running:
-
-        try:
-
-            scan()
-
-        except Exception:
-
-            log.exception(
-                "Main loop"
-            )
-
-        time.sleep(
-            config.SCAN_INTERVAL
-        )
+    scan_loop()
 
 
 if __name__ == "__main__":
 
-    main()
+    threading.Thread(target=run_bot, daemon=True).start()
+
+    port = int(os.environ.get("PORT", 10000))
+
+    server = HTTPServer(("0.0.0.0", port), Handler)
+
+    print(f"Listening on port {port}")
+
+    server.serve_forever()
