@@ -1,14 +1,13 @@
 import os
+import time
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 from config import config
-from watcher import watcher
-from reports import reports
+from watcher import start_watcher
+from reports import start_scheduler
 from telegram_bot import telegram
-from signals import while True:
-    # call your scan function here
-    time.sleep(config.SCAN_INTERVAL)
+from signals import scan
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -20,6 +19,16 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, format, *args):
         return
+
+
+def scanner_loop():
+    while True:
+        try:
+            scan()
+        except Exception as e:
+            print(f"Scanner error: {e}")
+
+        time.sleep(config.SCAN_INTERVAL)
 
 
 def run_bot():
@@ -35,17 +44,22 @@ Ready to scan.
 """
     )
 
+    # Start scheduled reports
     start_scheduler()
 
+    # Start trade watcher
     threading.Thread(target=start_watcher, daemon=True).start()
 
-    scan_loop()
+    # Start scanner
+    scanner_loop()
 
 
 if __name__ == "__main__":
 
+    # Run trading bot
     threading.Thread(target=run_bot, daemon=True).start()
 
+    # HTTP server for Render health checks
     port = int(os.environ.get("PORT", 10000))
 
     server = HTTPServer(("0.0.0.0", port), Handler)
