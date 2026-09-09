@@ -48,21 +48,20 @@ def scanner_loop():
 
 def run_bot():
 
-    print(">>> run_bot() started")
+    print("1. run_bot started")
 
-    telegram.send("🚀 StarFX V8.1 PRO started")
+    telegram.send("🚀 StarFX V8.1 started")
 
-    print(">>> Telegram OK")
+    print("2. Telegram OK")
 
     start_scheduler()
-
-    print(">>> Scheduler OK")
+    print("3. Scheduler started")
 
     threading.Thread(target=start_watcher, daemon=True).start()
+    print("4. Watcher started")
 
-    print(">>> Watcher started")
-
-    scanner_loop()    
+    scanner_loop()
+    print("5. Scanner exited")
         
 
 
