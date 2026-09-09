@@ -185,3 +185,5 @@ class Watcher:
 
 
 watcher = Watcher()
+def start_watcher():
+    watcher.loop()
