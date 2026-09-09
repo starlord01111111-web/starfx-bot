@@ -225,6 +225,61 @@ class SignalEngine:
 
 
 engine = SignalEngine()
+from data import market
+from config import config
+from risk import risk
+from database import db
+from telegram_bot import telegram
+
+
 def scan():
-    # Your existing scan code
-    pass
+
+    for symbol in config.SYMBOLS:
+
+        try:
+
+            data = market.multi_tf(symbol)
+
+            if data is None:
+                continue
+
+            signal = engine.analyze(data)
+
+            if signal is None:
+                continue
+
+            if db.check_duplicate(symbol):
+                continue
+
+            entry = signal["entry"]
+
+            atr = signal["atr"]
+
+            sl, tp1, tp2 = risk.levels(
+                symbol,
+                signal["side"],
+                entry,
+                atr
+            )
+
+            trade = {
+                "symbol": symbol,
+                "side": signal["side"],
+                "entry": entry,
+                "sl": sl,
+                "tp1": tp1,
+                "tp2": tp2,
+                "grade": signal["grade"],
+                "score": signal["score"],
+                "reasons": signal["reasons"],
+                "tp1_hit": False,
+                "sl_distance": abs(entry - sl)
+            }
+
+            db.add_trade(trade)
+
+            telegram.signal(trade)
+
+        except Exception as e:
+
+            print(f"{symbol}: {e}")
