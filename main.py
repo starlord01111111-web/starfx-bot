@@ -22,36 +22,65 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def scanner_loop():
+
+    print(">>> Scanner loop started")
+
     while True:
+
+        print(">>> Calling scan()")
+
         try:
             scan()
+            print(">>> Scan completed")
         except Exception as e:
-            print(f"Scanner error: {e}")
+            print(f">>> Scan error: {e}")
 
         time.sleep(config.SCAN_INTERVAL)
+    
+        
+            
+        
+            
+
+        
+
 
 
 def run_bot():
-    telegram.send(
-        """🚀 StarFX V8.1 PRO
 
-✅ Scanner Online
-✅ Watcher Online
-✅ Reports Scheduled
-✅ Database Connected
+    print(">>> run_bot() started")
 
-Ready to scan.
-"""
-    )
+    telegram.send("🚀 StarFX V8.1 PRO started")
 
-    # Start scheduled reports
+    print(">>> Telegram OK")
+
     start_scheduler()
 
-    # Start trade watcher
+    print(">>> Scheduler OK")
+
     threading.Thread(target=start_watcher, daemon=True).start()
 
-    # Start scanner
-    scanner_loop()
+    print(">>> Watcher started")
+
+    scanner_loop()    
+        
+
+
+
+
+
+
+
+    
+
+    
+    
+
+    
+    
+
+    
+    
 
 
 if __name__ == "__main__":
