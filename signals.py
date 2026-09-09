@@ -226,7 +226,6 @@ class SignalEngine:
 
 engine = SignalEngine()
 from data import market
-from config import config
 from risk import risk
 from database import db
 from telegram_bot import telegram
@@ -242,47 +241,11 @@ def scan():
 
     for symbol, ticker in config.SYMBOLS.items():
 
-    print(f"Scanning {symbol} ({ticker})")
+        print(f"Scanning {symbol} ({ticker})")
 
-    try:
+        try:
 
-        data = market.get_all(ticker)
-
-        if data is None:
-            print(f"No data for {symbol}")
-            continue
-
-        signal = engine.analyze(data)
-
-        if signal is None:
-            print(f"No signal for {symbol}")
-            continue
-
-        print(f"Signal found for {symbol}")
-
-        trade = risk.create_trade(symbol, signal)
-
-        db.add_trade(trade)
-
-        telegram.signal(trade)
-
-        print(f"Trade sent for {symbol}")
-
-    except Exception as e:
-
-        print(f"Error scanning {symbol}: {e}")
-
-    
-
-    
-
-        
-
-        
-
-        
-
-            
+            data = market.get_all(ticker)
 
             if data is None:
                 print(f"No data for {symbol}")
@@ -307,5 +270,12 @@ def scan():
         except Exception as e:
 
             print(f"Error scanning {symbol}: {e}")
+
+
+
+
+
+
+
 
     
