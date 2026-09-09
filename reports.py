@@ -187,3 +187,5 @@ Win Rate: {s['winrate']}%
 
 
 reports = Reports()
+def start_scheduler():
+    reports.start()
