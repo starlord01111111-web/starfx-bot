@@ -238,7 +238,8 @@ def scan():
 
         try:
 
-            data = market.multi_tf(symbol)
+            ticker = config.SYMBOLS[symbol]
+data = market.get_all(ticker)
 
             if data is None:
                 continue
