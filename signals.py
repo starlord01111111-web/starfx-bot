@@ -234,6 +234,44 @@ from telegram_bot import telegram
 
 def scan():
 
+    print("===== Starting scan =====")
+
+    if not risk.trading_allowed():
+        print("Trading not allowed.")
+        return
+
+    for symbol in config.SYMBOLS:
+
+        print(f"Scanning {symbol}")
+
+        try:
+
+            data = market.get_all(symbol)
+
+            if data is None:
+                print(f"No data for {symbol}")
+                continue
+
+            signal = engine.analyze(data)
+
+            if signal is None:
+                print(f"No signal for {symbol}")
+                continue
+
+            print(f"Signal found for {symbol}")
+
+            trade = risk.create_trade(symbol, signal)
+
+            db.add_trade(trade)
+
+            telegram.signal(trade)
+
+            print(f"Trade sent for {symbol}")
+
+        except Exception as e:
+
+            print(f"Error scanning {symbol}: {e}")
+
     for symbol in config.SYMBOLS:
 
         try:
