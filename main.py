@@ -32,11 +32,11 @@ running = True
 
 def validate():
 
-    if not config.TELEGRAM_TOKEN:"8656945768:AAE4-rNQ6EDm7wPNorQctAXWfcSYkCv1b2U"
-        
+    if not config.TELEGRAM_TOKEN:
+        raise RuntimeError("Missing TELEGRAM_TOKEN")
 
-    if not config.CHAT_ID:"-1004365660319"
-    
+    if not config.CHAT_ID:
+        raise RuntimeError("Missing CHAT_ID")
 
 
 # -------------------------------------------------
