@@ -586,4 +586,22 @@ def cmd_listener():
             for update in r.get("result", []):
                 offset = update["update_id"] + 1
                 msg = update.get("message")
-                if n
+                if not msg:
+    while running:
+        try:
+            url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates?offset={offset}&timeout=20"
+            r = requests.get(url, timeout=25).json()
+            for update in r.get("result", []):
+                offset = update["update_id"] + 1
+                msg = update.get("message")
+                if not msg:
+                    continue
+                if msg.get("from", {}).get("id") == bot_id or msg.get("from", {}).get("is_bot"):
+                    continue
+                text = msg.get("text", "")
+                chat_id = msg.get("chat", {}).get("id")
+                if text and text.startswith("/"):
+                    handle_cmd(text, chat_id)
+        except Exception as e:
+            logging.error(f"Polling loop exception: {e}")
+        time.sleep(1.0)
