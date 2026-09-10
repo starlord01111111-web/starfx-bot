@@ -1,3 +1,10 @@
-yfinance
 pandas
+python-telegram-bot
+ccxt
 requests
+scikit-learn
+numpy
+mplfinance
+matplotlib
+
+
