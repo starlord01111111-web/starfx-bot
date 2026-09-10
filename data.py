@@ -49,16 +49,24 @@ class MarketData:
 
             try:
 
-                df = yf.download(
-                    ticker,
-                    period=period,
-                    interval=interval,
-                    progress=False,
-                    auto_adjust=False,
-                    threads=False
-                )
+         df = yf.download(
+    ticker=ticker,
+    period=period,
+    interval=interval,
+    progress=False,
+    auto_adjust=False,
+    threads=False,
+    timeout=20
+         ) print(f"Downloading {ticker} {interval}")      
+                    
+                
+                
+                
+                
+                
+                
 
-                if len(df) == 0:
+                if len(df) == 0: print(f"No data returned for {ticker}")
                     raise Exception("Empty dataframe")
 
                 if isinstance(df.columns, pd.MultiIndex):
@@ -91,17 +99,29 @@ class MarketData:
 
                 return df
 
-            except Exception:
+            except Exception as e:
+    print(f"[ERROR] {ticker} ({interval}): {e}")
 
-                time.sleep(delay + random.random())
+    import traceback
+    traceback.print_exc()
 
-                delay *= 2
+    time.sleep(delay + random.random())
+    delay *= 2
+        
+      self.pause_until = datetime.utcnow() + timedelta(
+    minutes=config.YAHOO_PAUSE_MINUTES
+)
 
-        self.pause_until = datetime.utcnow() + timedelta(
-            minutes=config.YAHOO_PAUSE_MINUTES
-        )
+print("=" * 60)
+print("⚠️ Yahoo Finance rate limit reached!")
+print(f"Bot paused until: {self.pause_until}")
+print("No market data will be downloaded during this period.")
+print("=" * 60)
 
-        return None
+return None  
+        
+
+        
 
     ##################################################
 
