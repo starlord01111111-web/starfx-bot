@@ -23,52 +23,69 @@ class Handler(BaseHTTPRequestHandler):
         return
 
 
-# -----------------------------------------------------
+# =====================================================
 # Scanner Loop
-# -----------------------------------------------------
+# =====================================================
 
 def scanner_loop():
 
-    print(">>> Scanner loop started")
+    print("=" * 60)
+    print("Scanner loop started")
+    print("=" * 60)
 
     while True:
 
         try:
 
             if telegram.paused:
-                print("Scanner paused...")
+                print("Scanner is paused.")
+
             else:
-                print(">>> Running market scan...")
+                print("Running market scan...")
                 scan()
+                print("Market scan finished.")
 
         except Exception:
+
+            print("Scanner crashed:")
             print(traceback.format_exc())
+
+            telegram.send(
+                "❌ Scanner Error\n\n"
+                f"```{traceback.format_exc()}```"
+            )
+
+        print(f"Sleeping {config.SCAN_INTERVAL} seconds...\n")
 
         time.sleep(config.SCAN_INTERVAL)
 
 
-# -----------------------------------------------------
+# =====================================================
 # Trading Bot
-# -----------------------------------------------------
+# =====================================================
 
 def run_bot():
 
     try:
 
-        print("Starting StarFX V8.1...")
+        print("=" * 60)
+        print("Starting StarFX V8.1")
+        print("=" * 60)
 
         telegram.send("🚀 StarFX V8.1 started")
 
-        # Start scheduled reports
+        print("Starting scheduler...")
         start_scheduler()
+        print("Scheduler started.")
 
-        # Start trade watcher
+        print("Starting watcher...")
         threading.Thread(
             target=start_watcher,
             daemon=True
         ).start()
+        print("Watcher started.")
 
-        # Start scanner
+        print("Starting scanner...")
         scanner_loop()
 
     except Exception:
@@ -83,40 +100,33 @@ def run_bot():
         )
 
 
-# -----------------------------------------------------
+# =====================================================
 # Main
-# -----------------------------------------------------
+# =====================================================
 
 if __name__ == "__main__":
 
-    # Start bot in background
-    threading.Thread(
+    print("Launching bot thread...")
+
+    bot_thread = threading.Thread(
         target=run_bot,
         daemon=True
-    ).start()
+    )
 
-    # HTTP server for Render health checks
+    bot_thread.start()
+
     port = int(os.environ.get("PORT", 10000))
 
-    server = HTTPServer(("0.0.0.0", port), Handler)
+    server = HTTPServer(
+        ("0.0.0.0", port),
+        Handler
+    )
 
-    print(f"Listening on port {port}")
+    print("=" * 60)
+    print(f"HTTP server listening on port {port}")
+    print("=" * 60)
 
-    server.serve_forever()
-
-
-
-
-    
-
-    
-    
-
-    
-    
-
-    
-    
+    server.serve_forever()    
 
 
 if __name__ == "__main__":
