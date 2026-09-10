@@ -6,13 +6,14 @@ import signal
 import requests
 import threading
 from datetime import datetime
+from http.server import BaseHTTPRequestHandler, HTTPServer
 import yfinance as yf
 import pandas as pd
 
 # ========= CONFIG =========
 BOT_TOKEN = "8656945768:AAE4-rNQ6EDm7wPNorQctAXWfcSYkCv1b2U"
 CHANNEL_ID = "-1004365660319"
-SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "300"))          # seconds
+SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "300"))
 COOLDOWN_MINUTES = int(os.getenv("COOLDOWN_MINUTES", "120"))
 MIN_RRR = float(os.getenv("MIN_RRR", "1.8"))
 
@@ -21,7 +22,7 @@ SYMBOLS = ["frxEURUSD", "frxGBPUSD", "frxUSDJPY", "frxXAUUSD", "frxBTCUSD"]
 MAP = {
     "frxEURUSD": "EURUSD=X",
     "frxGBPUSD": "GBPUSD=X",
-    "frxUSDJPY": "USDJPY=X",      # FIXED
+    "frxUSDJPY": "USDJPY=X",
     "frxXAUUSD": "GC=F",
     "frxBTCUSD": "BTC-USD",
 }
@@ -32,7 +33,26 @@ logging.basicConfig(
 )
 
 CACHE = {}
-CACHE_TIME = 600  # seconds
+CACHE_TIME = 600
+
+
+# ========= HEALTH SERVER (for Render) =========
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"StarFx Bot is running")
+
+    def log_message(self, format, *args):
+        return  # silence access logs
+
+
+def start_health_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), HealthHandler)
+    logging.info(f"Health server running on port {port}")
+    server.serve_forever()
 
 
 # ========= DATABASE =========
@@ -50,7 +70,6 @@ class Database:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        # Speed up cooldown checks
         self.conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_signals_cooldown
             ON signals (symbol, type, created_at)
@@ -102,13 +121,12 @@ class Telegram:
             f"Score: {s['score']}/7 | {s['reasons']}\n"
             f"RRR ≥ {MIN_RRR} | V8.4 FIXED"
         )
-        self.send(msg)  # always to channel
+        self.send(msg)
 
 
 # ========= DATA FEED =========
 class DataFeed:
     def _flatten(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Handle yfinance MultiIndex columns."""
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
         return df
@@ -130,7 +148,6 @@ class DataFeed:
                 )
                 if df is not None and not df.empty and len(df) > 50:
                     df = self._flatten(df)
-                    # Ensure we have the columns we need
                     required = ["Open", "High", "Low", "Close"]
                     if all(c in df.columns for c in required):
                         return df
@@ -173,11 +190,9 @@ class SignalEngine:
         t4 = self.trend(df4h)
         t1 = self.trend(df1h)
 
-        # Require higher-timeframe agreement
         if t4 == "NEUTRAL" or t1 == "NEUTRAL" or t4 != t1:
             return None
 
-        # Indicators on 15m
         df = df15.copy()
         df["EMA50"]  = df["Close"].ewm(span=50, adjust=False).mean()
         df["EMA200"] = df["Close"].ewm(span=200, adjust=False).mean()
@@ -185,7 +200,6 @@ class SignalEngine:
         df["RSI"]    = self.rsi(df["Close"])
         df["MACD"], df["SIG"] = self.macd(df["Close"])
 
-        # Volume average (may be sparse on FX)
         if "Volume" in df.columns and df["Volume"].sum() > 0:
             df["VOLAVG"] = df["Volume"].rolling(20).mean()
         else:
@@ -195,7 +209,6 @@ class SignalEngine:
         score = 0
         reasons = []
 
-        # 1. EMA structure
         if t4 == "BULLISH" and last["Close"] > last["EMA50"] > last["EMA200"]:
             score += 1
             reasons.append("EMA Bull")
@@ -203,7 +216,6 @@ class SignalEngine:
             score += 1
             reasons.append("EMA Bear")
 
-        # 2. Momentum
         if t4 == "BULLISH" and last["RSI"] > 55 and last["MACD"] > last["SIG"]:
             score += 1
             reasons.append("RSI+MACD")
@@ -211,12 +223,10 @@ class SignalEngine:
             score += 1
             reasons.append("RSI+MACD")
 
-        # 3. Volume (optional)
         if last.get("VOLAVG", 0) > 0 and last["Volume"] > last["VOLAVG"] * 1.2:
             score += 1
             reasons.append("Vol")
 
-        # 4-7. Structure concepts
         if self.fvg(df, t4):
             score += 1
             reasons.append("FVG")
@@ -252,7 +262,6 @@ class SignalEngine:
                 "reasons": ", ".join(reasons)
             }
         else:
-            # FIXED SELL levels
             return {
                 "type": f"SELL [Score {score}/7]",
                 "price": price,
@@ -330,7 +339,6 @@ class SignalEngine:
             return False
 
     def valid_session(self) -> bool:
-        # UTC hours – London + New York overlap focus
         hour = datetime.utcnow().hour
         return hour in {7, 8, 9, 10, 12, 13, 14, 15, 16}
 
@@ -364,7 +372,6 @@ def backtest_fast(symbol: str) -> str:
     wins = losses = 0
 
     for i in range(200, len(df) - 15):
-        # Feed only past data to avoid lookahead
         sig = engine.analyze(df.iloc[:i], mtf["1h"], mtf["4h"])
         if not sig:
             continue
@@ -399,7 +406,6 @@ def backtest_fast(symbol: str) -> str:
 def handle_cmd(text: str, chat_id):
     low = text.lower().strip()
 
-    # Ignore own messages that look like signals
     if "V8." in text and "/" in text and len(text) > 20:
         return
 
@@ -467,7 +473,6 @@ def handle_cmd(text: str, chat_id):
     elif low.startswith("/backtest"):
         parts = low.split()
         raw = parts[1].upper() if len(parts) > 1 else "EURUSD"
-        # Normalize to internal symbol
         if not raw.startswith("FRX"):
             sym = "frx" + raw.replace("FRX", "")
         else:
@@ -522,7 +527,6 @@ def cmd_listener():
                 msg = update.get("message")
                 if not msg:
                     continue
-                # Ignore messages from the bot itself
                 if msg.get("from", {}).get("id") == bot_id:
                     continue
                 if msg.get("from", {}).get("is_bot"):
@@ -555,6 +559,9 @@ if __name__ == "__main__":
     if not BOT_TOKEN:
         logging.warning("BOT_TOKEN is empty – Telegram features disabled")
 
+    # Start health server for Render
+    threading.Thread(target=start_health_server, daemon=True).start()
+
     tg.send("✅ *V8.4 FIXED LIVE*\nDM replies working | /scan ready\nType /start in bot DM")
 
     threading.Thread(target=cmd_listener, daemon=True).start()
@@ -574,7 +581,6 @@ if __name__ == "__main__":
         except Exception as e:
             logging.error(f"Main loop error: {e}")
 
-        # Sleep in small chunks so we can exit quickly
         for _ in range(SCAN_INTERVAL // 5):
             if not running:
                 break
