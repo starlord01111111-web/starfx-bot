@@ -208,7 +208,6 @@ class SignalEngine:
         score = 0
         reasons = []
 
-        # EMA Structure
         if t4 == "BULLISH" and last["Close"] > last["EMA50"] > last["EMA200"]:
             score += 1
             reasons.append("EMA Bull")
@@ -216,7 +215,6 @@ class SignalEngine:
             score += 1
             reasons.append("EMA Bear")
 
-        # Momentum
         if t4 == "BULLISH" and last["RSI"] > 55 and last["MACD"] > last["SIG"]:
             score += 1
             reasons.append("RSI+MACD")
@@ -224,12 +222,10 @@ class SignalEngine:
             score += 1
             reasons.append("RSI+MACD")
 
-        # Volume
         if last.get("VOLAVG", 0) > 0 and last["Volume"] > last["VOLAVG"] * 1.2:
             score += 1
             reasons.append("Vol")
 
-        # Structure Concepts
         if self.fvg(df, t4):
             score += 1
             reasons.append("FVG")
@@ -533,25 +529,44 @@ if __name__ == "__main__":
     if not BOT_TOKEN:
         logging.warning("BOT_TOKEN is empty")
 
-    # Start health server for Render
+    # 1. Start health server first (most important for Render)
     threading.Thread(target=start_health_server, daemon=True).start()
+    time.sleep(1)
 
-    tg.send("✅ *V8.5 CLEAN LIVE*\nType /start in bot DM")
+    # 2. Start command listener with auto-restart
+    def run_listener():
+        while running:
+            try:
+                cmd_listener()
+            except Exception as e:
+                logging.error(f"Listener crashed: {e}")
+                logging.info("Restarting command listener in 5 seconds...")
+                time.sleep(5)
 
-    threading.Thread(target=cmd_listener, daemon=True).start()
-    logging.info("V8.5 CLEAN started")
+    threading.Thread(target=run_listener, daemon=True).start()
 
+    # 3. Notify that bot is online
+    time.sleep(2)
+    tg.send("✅ *V8.5 CLEAN* — Bot restarted and online")
+
+    logging.info("V8.5 CLEAN started successfully")
+
+    # 4. Main scanning loop (resilient)
     while running:
         try:
             for sym in SYMBOLS:
-                mtf = get_cached_mtf(sym)
-                sig = engine.analyze(mtf.get("15m"), mtf.get("1h"), mtf.get("4h"))
-                if sig and risk.validate(sig):
-                    base = sig["type"].split("[")[0].strip()
-                    if not db.is_duplicate(sym, base, COOLDOWN_MINUTES):
-                        tg.send_signal(sym, sig)
-                        db.save(sym, base, sig["price"], sig["score"], sig["reasons"])
-                        logging.info(f"SENT {sym} {sig['type']}")
+                try:
+                    mtf = get_cached_mtf(sym)
+                    sig = engine.analyze(mtf.get("15m"), mtf.get("1h"), mtf.get("4h"))
+                    if sig and risk.validate(sig):
+                        base = sig["type"].split("[")[0].strip()
+                        if not db.is_duplicate(sym, base, COOLDOWN_MINUTES):
+                            tg.send_signal(sym, sig)
+                            db.save(sym, base, sig["price"], sig["score"], sig["reasons"])
+                            logging.info(f"SENT {sym} {sig['type']}")
+                except Exception as e:
+                    logging.error(f"Error scanning {sym}: {e}")
+
         except Exception as e:
             logging.error(f"Main loop error: {e}")
 
