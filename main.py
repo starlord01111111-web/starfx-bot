@@ -46,22 +46,27 @@ def scanner_loop():
 
 
 
-import traceback
-
 def run_bot():
+    print(">>> run_bot started")
+
     try:
+        print(">>> Sending startup message")
         telegram.send("🚀 StarFX V8.1 started")
 
+        print(">>> Starting scheduler")
         start_scheduler()
 
+        print(">>> Starting watcher")
         threading.Thread(
             target=start_watcher,
             daemon=True
         ).start()
 
+        print(">>> Starting scanner")
         scanner_loop()
 
     except Exception:
+        print(traceback.format_exc())
         telegram.send(
             "❌ BOT CRASHED\n\n" + traceback.format_exc()
         )
