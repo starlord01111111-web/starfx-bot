@@ -54,12 +54,10 @@ def run_bot():
 
         start_scheduler()
 
-        bot = threading.Thread(target=run_bot)
-bot.start()
-bot.join()
-            
-            
-        
+        threading.Thread(
+            target=start_watcher,
+            daemon=True
+        ).start()
 
         scanner_loop()
 
