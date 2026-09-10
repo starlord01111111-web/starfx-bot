@@ -586,15 +586,7 @@ def cmd_listener():
             for update in r.get("result", []):
                 offset = update["update_id"] + 1
                 msg = update.get("message")
-                if not msg:
-    while running:
-        try:
-            url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates?offset={offset}&timeout=20"
-            r = requests.get(url, timeout=25).json()
-            for update in r.get("result", []):
-                offset = update["update_id"] + 1
-                msg = update.get("message")
-                if not msg:
+                                if not msg:
                     continue
                 if msg.get("from", {}).get("id") == bot_id or msg.get("from", {}).get("is_bot"):
                     continue
@@ -605,3 +597,41 @@ def cmd_listener():
         except Exception as e:
             logging.error(f"Polling loop exception: {e}")
         time.sleep(1.0)
+# ========= MAIN EXECUTION LOOP =========
+def signal_handler(sig, frame):
+    global running
+    logging.info("Shutting down StarFx Engine...")
+    running = False
+
+
+if __name__ == "__main__":
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
+    # Start Health Check Server Thread
+    health_thread = threading.Thread(target=start_health_server, daemon=True)
+    health_thread.start()
+
+    # Start Telegram Command Listener Thread
+    listener_thread = threading.Thread(target=cmd_listener, daemon=True)
+    listener_thread.start()
+
+    logging.info("StarFx Engine fully booted. Active monitoring sequence started.")
+
+    while running:
+        for sym in SYMBOLS:
+            try:
+                mtf = get_cached_mtf(sym)
+                if not mtf:
+                    continue
+                sig = engine.analyze(mtf["15m"], mtf["1h"], mtf["4h"])
+                if sig and risk.validate(sig):
+                    base = sig["type"].split("[")[0].strip()
+                    if not db.is_duplicate(sym, base, COOLDOWN_MINUTES):
+                        tg.send_signal(sym, sig)
+                        db.save(sym, base, sig["price"], sig["score"], sig["reasons"])
+            except Exception as e:
+                logging.error(f"Execution error on {sym}: {e}")
+
+        time.sleep(SCAN_INTERVAL)
+                
