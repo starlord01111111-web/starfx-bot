@@ -1,638 +1,422 @@
+import asyncio
+from datetime import datetime, timezone, timedelta
 import os
-import time
 import sqlite3
-import logging
-import signal
-import requests
-import threading
-from datetime import datetime, timezone
-from http.server import BaseHTTPRequestHandler, HTTPServer
-import yfinance as yf
+import ccxt
+import matplotlib.pyplot as plt
+import mplfinance as mpf
+import numpy as np
 import pandas as pd
+import requests
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes
 
-# Try importing psycopg2 for production PostgreSQL support
-try:
-    import psycopg2
-    import psycopg2.pool
-    HAS_POSTGRES = True
-except ImportError:
-    HAS_POSTGRES = False
+# --- CONFIGURATION ---
+TELEGRAM_TOKEN = "8656945768:AAE4-rNQ6EDm7wPNorQctAXWfcSYkCv1b2U"
+CHAT_ID = "-1004365660319"
+SYMBOLS = ["XAU/USD", "GBP/USD", "BTC/USDT"]
+NEWS_CURRENCY = ["USD", "GBP"]
 
-# ========= CONFIGURATION =========
-BOT_TOKEN = "8656945768:AAE4-rNQ6EDm7wPNorQctAXWfcSYkCv1b2U"
-CHANNEL_ID = "-1004365660319"
-SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "300"))
-COOLDOWN_MINUTES = int(os.getenv("COOLDOWN_MINUTES", "120"))
-MIN_RRR = float(os.getenv("MIN_RRR", "1.8"))
-DATABASE_URL = os.getenv("DATABASE_URL", "")
+# Account Risk Config
+ACCOUNT_BALANCE = 10000.00  # Default equity reference ($)
+RISK_PER_TRADE_PCT = 0.01   # Risk 1% of account balance per trade
+MAX_DAILY_LOSS_PCT = 0.03   # Block new trades if daily drawdown reaches 3%
+MAX_CONCURRENT_TRADES = 2   # Maximum open active trades allowed
 
-SYMBOLS = ["frxEURUSD", "frxGBPUSD", "frxUSDJPY", "frxXAUUSD", "frxBTCUSD"]
+exchange = ccxt.binance()
 
-MAP = {
-    "frxEURUSD": "EURUSD=X",
-    "frxGBPUSD": "GBPUSD=X",
-    "frxUSDJPY": "USDJPY=X",
-    "frxXAUUSD": "GC=F",
-    "frxBTCUSD": "BTC-USD",
-}
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - [%(levelname)s] - %(message)s"
-)
-
-CACHE = {}
-CACHE_TIME = 300  # 5 minutes cache for market data
+# State Tracking Variables
+daily_stats = {"date": None, "losses_today": 0.0, "is_circuit_broken": False}
+active_trades = []
 
 
-# ========= HEALTH SERVER FOR HOSTING =========
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-type", "text/plain")
-        self.end_headers()
-        self.wfile.write(b"StarFx Bot V9.0 Engine Operational")
-
-    def log_message(self, format, *args):
-        return
-
-
-def start_health_server():
-    port = int(os.environ.get("PORT", 10000))
-    server = HTTPServer(("0.0.0.0", port), HealthHandler)
-    logging.info(f"Health check endpoint active on port {port}")
-    server.serve_forever()
+# --- RISK & POSITION SIZING ENGINE ---
+def calculate_position_size(account_balance, risk_pct, entry, stop_loss):
+    """
+    Calculates dynamic position size based on exact dollar risk.
+    """
+    risk_amount = account_balance * risk_pct
+    price_risk = abs(entry - stop_loss)
+    if price_risk == 0:
+        return 0.0
+    units = risk_amount / price_risk
+    return round(units, 4)
 
 
-# ========= PRODUCTION DATABASE ENGINE =========
-class ProductionDatabase:
-    def __init__(self):
-        self.is_postgres = HAS_POSTGRES and DATABASE_URL.startswith("postgres")
-        if self.is_postgres:
-            logging.info("Initializing PostgreSQL Connection Pool...")
-            self.pool = psycopg2.pool.SimpleConnectionPool(1, 10, DATABASE_URL)
-        else:
-            logging.info("Using Local SQLite Storage (starfx.db)...")
-            self.db_path = "starfx.db"
-        self._init_db()
+def check_circuit_breaker():
+    """Resets daily stats at midnight UTC and verifies daily drawdown caps."""
+    global daily_stats
+    today = datetime.now(timezone.utc).date()
+    
+    if daily_stats["date"] != today:
+        daily_stats["date"] = today
+        daily_stats["losses_today"] = 0.0
+        daily_stats["is_circuit_broken"] = False
 
-    def get_connection(self):
-        if self.is_postgres:
-            return self.pool.getconn()
-        return sqlite3.connect(self.db_path, timeout=15)
+    if daily_stats["losses_today"] >= (ACCOUNT_BALANCE * MAX_DAILY_LOSS_PCT):
+        daily_stats["is_circuit_broken"] = True
+        return False  # Trading disabled due to hitting daily loss limit
 
-    def release_connection(self, conn):
-        if self.is_postgres:
-            self.pool.putconn(conn)
-        else:
-            conn.close()
-
-    def _init_db(self):
-        conn = self.get_connection()
-        try:
-            cur = conn.cursor()
-            if self.is_postgres:
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS signals (
-                        id SERIAL PRIMARY KEY,
-                        symbol VARCHAR(32),
-                        type VARCHAR(32),
-                        price DOUBLE PRECISION,
-                        score INT,
-                        reasons TEXT,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    );
-                    CREATE INDEX IF NOT EXISTS idx_signals_cd ON signals (symbol, type, created_at);
-                """)
-            else:
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS signals (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        symbol TEXT,
-                        type TEXT,
-                        price REAL,
-                        score INTEGER,
-                        reasons TEXT,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    );
-                    CREATE INDEX IF NOT EXISTS idx_signals_cd ON signals (symbol, type, created_at);
-                """)
-            conn.commit()
-        finally:
-            self.release_connection(conn)
-
-    def is_duplicate(self, symbol, signal_type, cooldown_mins):
-        conn = self.get_connection()
-        try:
-            cur = conn.cursor()
-            if self.is_postgres:
-                cur.execute(
-                    "SELECT 1 FROM signals WHERE symbol=%s AND type=%s AND created_at > NOW() - INTERVAL %s;",
-                    (symbol, signal_type, f"{cooldown_mins} minutes")
-                )
-            else:
-                cur.execute(
-                    "SELECT 1 FROM signals WHERE symbol=? AND type=? AND created_at > datetime('now', ?);",
-                    (symbol, signal_type, f"-{cooldown_mins} minutes")
-                )
-            return cur.fetchone() is not None
-        finally:
-            self.release_connection(conn)
-
-    def save(self, symbol, signal_type, price, score, reasons):
-        conn = self.get_connection()
-        try:
-            cur = conn.cursor()
-            placeholder = "%s, %s, %s, %s, %s" if self.is_postgres else "?, ?, ?, ?, ?"
-            cur.execute(
-                f"INSERT INTO signals (symbol, type, price, score, reasons) VALUES ({placeholder})",
-                (symbol, signal_type, price, score, reasons)
-            )
-            conn.commit()
-        finally:
-            self.release_connection(conn)
-
-    def get_total_count(self):
-        conn = self.get_connection()
-        try:
-            cur = conn.cursor()
-            cur.execute("SELECT COUNT(*) FROM signals;")
-            return cur.fetchone()[0]
-        finally:
-            self.release_connection(conn)
+    return True
 
 
-db = ProductionDatabase()
+# --- TIME & SESSION ENGINE (EAT = UTC + 3) ---
+def is_valid_trading_session():
+    """
+    Validates if current time is within trading sessions starting at 09:00 AM EAT.
+    """
+    now_utc = datetime.now(timezone.utc)
+    eat_hour = (now_utc.hour + 3) % 24
+    
+    # 1. Daily Start Filter: No trades before 09:00 AM EAT
+    if eat_hour < 9:
+        return False, "OFF_HOURS"
+
+    # 2. Session Filters (EAT Times)
+    # London Session: 09:00 EAT to 18:00 EAT
+    # New York Session: 16:00 EAT to 22:00 EAT
+    if 9 <= eat_hour < 18:
+        return True, "LONDON_SESSION"
+    elif 16 <= eat_hour < 22:
+        return True, "NEW_YORK_SESSION"
+        
+    return False, "OFF_HOURS"
 
 
-# ========= TELEGRAM INTERFACE =========
-class Telegram:
-    def __init__(self):
-        self.base_url = f"https://api.telegram.org/bot{BOT_TOKEN}"
-
-    def send(self, text, chat_id=None):
-        target = chat_id if chat_id else CHANNEL_ID
-        if not BOT_TOKEN or not target:
-            return
-        url = f"{self.base_url}/sendMessage"
-        for attempt in range(3):
-            try:
-                res = requests.post(
-                    url,
-                    json={"chat_id": target, "text": text, "parse_mode": "Markdown"},
-                    timeout=8
-                )
-                if res.status_code == 200:
-                    break
-            except Exception as e:
-                logging.error(f"Telegram retry {attempt+1}/3 failed: {e}")
-                time.sleep(1)
-
-    def send_signal(self, symbol, s):
-        msg = (
-            f"🚀 *{symbol} {s['type']}*\n"
-            f"💰 Entry: `{s['price']:.5f}`\n"
-            f"🛑 SL: `{s['sl']:.5f}` | 🎯 TP: `{s['tp']:.5f}`\n"
-            f"📊 Score: *{s['score']}/7* | Confluences: _{s['reasons']}_\n"
-            f"⚖️ RRR ≥ {MIN_RRR} | V9.0 Institutional Engine"
-        )
-        self.send(msg)
+# --- DATA ENGINE ---
+def fetch_data(symbol, timeframe, limit=100):
+    bars = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+    df = pd.DataFrame(bars, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
+    df.set_index('timestamp', inplace=True)
+    return df
 
 
-# ========= DATA FEED PROVIDER =========
-class DataFeed:
-    def _clean_df(self, df):
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-        return df.dropna()
+# --- TRADINGVIEW CHART ENGINE ---
+def generate_tradingview_chart(df, symbol, setup, filename="chart.png"):
+    plot_df = df.iloc[-40:].copy()
+    
+    mc = mpf.make_marketcolors(
+        up='#26a69a', down='#ef5350',
+        edge='inherit', wick='inherit', volume='in'
+    )
+    style = mpf.make_mpf_style(marketcolors=mc, gridstyle=":", gridcolor="#2a2e39", facecolor="#131722")
+    
+    hlines = [setup['price'], setup['tp1'], setup['tp2'], setup['sl']]
+    colors = ['#2962ff', '#00e676', '#00c853', '#ff1744']
+    
+    fig, _ = mpf.plot(
+        plot_df,
+        type='candle',
+        style=style,
+        title=f"\n{symbol} - {setup['bias']} (A+ Setup)",
+        hlines=dict(hlines=hlines, colors=colors, linestyle='--', linewidths=1.5),
+        savefig=filename,
+        returnfig=True,
+        figratio=(16, 9),
+        figscale=1.2
+    )
+    plt.close(fig)
+    return filename
 
-    def get(self, symbol, interval, period, retries=3):
-        ticker = MAP.get(symbol)
-        if not ticker:
-            return None
 
-        for attempt in range(retries):
-            try:
-                df = yf.download(
-                    ticker,
-                    period=period,
-                    interval=interval,
-                    progress=False,
-                    auto_adjust=True,
-                    threads=False
-                )
-                if df is not None and not df.empty and len(df) > 50:
-                    df = self._clean_df(df)
-                    if all(col in df.columns for col in ["Open", "High", "Low", "Close"]):
-                        return df
-            except Exception as e:
-                logging.warning(f"Data download retry {attempt+1} for {symbol}: {e}")
-                time.sleep(1.5 * (attempt + 1))
+# --- NEWS & TECHNICAL ENGINE ---
+def fetch_news_window():
+    try:
+        url = "https://n8n.forexfactory.com/ff_calendar_thisweek.json"
+        response = requests.get(url, timeout=10)
+        if response.status_code == 200:
+            events = response.json()
+            now = datetime.now(timezone.utc)
+            pre_news_events = []
+            for ev in events:
+                if ev.get("impact") == "High" and ev.get("country") in NEWS_CURRENCY:
+                    ev_time = datetime.fromisoformat(ev["date"])
+                    mins_until_news = (ev_time - now).total_seconds() / 60
+                    if 30 <= mins_until_news <= 120:
+                        pre_news_events.append(ev)
+            return pre_news_events
+    except Exception as e:
+        print(f"News Fetch Error: {e}")
+    return []
+
+
+def analyze_structure(df, window=20):
+    recent = df.iloc[:-1]
+    high = recent['high'].iloc[-window:].max()
+    low = recent['low'].iloc[-window:].min()
+    current_close = df['close'].iloc[-1]
+    
+    if current_close > high: return "BULLISH"
+    if current_close < low: return "BEARISH"
+    
+    ema = df['close'].ewm(span=20).mean().iloc[-1]
+    return "BULLISH" if current_close > ema else "BEARISH"
+
+
+def detect_price_action(df):
+    c1 = df.iloc[-2]
+    body_1 = abs(c1['close'] - c1['open'])
+    upper_wick = c1['high'] - max(c1['close'], c1['open'])
+    lower_wick = min(c1['close'], c1['open']) - c1['low']
+    
+    if lower_wick >= (2 * body_1) and upper_wick <= (0.5 * body_1):
+        return "BULLISH_PINBAR"
+    if upper_wick >= (2 * body_1) and lower_wick <= (0.5 * body_1):
+        return "BEARISH_PINBAR"
+    if c1['close'] > c1['open'] and df.iloc[-3]['close'] < df.iloc[-3]['open'] and body_1 > abs(df.iloc[-3]['close'] - df.iloc[-3]['open']):
+        return "BULLISH_ENGULFING"
+    if c1['close'] < c1['open'] and df.iloc[-3]['close'] > df.iloc[-3]['open'] and body_1 > abs(df.iloc[-3]['close'] - df.iloc[-3]['open']):
+        return "BEARISH_ENGULFING"
+    return None
+
+
+def detect_liquidity_sweep(df, window=30):
+    recent_high = df['high'].iloc[-window:-2].max()
+    recent_low = df['low'].iloc[-window:-2].min()
+    c1, c0 = df.iloc[-2], df.iloc[-1]
+    
+    if c1['low'] < recent_low and c0['close'] > recent_low:
+        return "BULLISH_SWEEP"
+    if c1['high'] > recent_high and c0['close'] < recent_high:
+        return "BEARISH_SWEEP"
+    return None
+
+
+# --- A+ EVALUATOR WITH RISK CONTROLS ---
+def evaluate_aplus_setup(symbol):
+    # Check circuit breaker & max concurrent trades
+    if not check_circuit_breaker():
+        return None
+    if len(active_trades) >= MAX_CONCURRENT_TRADES:
         return None
 
-    def get_mtf(self, symbol):
+    session_active, session_name = is_valid_trading_session()
+    if not session_active:
+        return None
+
+    pre_news = fetch_news_window()
+    
+    tf_data = {
+        'H4': fetch_data(symbol, '4h'),
+        'H1': fetch_data(symbol, '1h'),
+        'M15': fetch_data(symbol, '15m'),
+        'M5': fetch_data(symbol, '5m')
+    }
+    
+    h4_bias = analyze_structure(tf_data['H4'])
+    h1_bias = analyze_structure(tf_data['H1'])
+    
+    if h4_bias != h1_bias:
+        return None
+        
+    m15_sweep = detect_liquidity_sweep(tf_data['M15'])
+    m5_sweep = detect_liquidity_sweep(tf_data['M5'])
+    m5_pa = detect_price_action(tf_data['M5'])
+    price = tf_data['M5']['close'].iloc[-1]
+    
+    score = 0
+    if h4_bias == h1_bias: score += 30
+    if m15_sweep or m5_sweep: score += 30
+    if m5_pa: score += 25
+    if pre_news: score += 15
+
+    if score < 85:
+        return None
+
+    # BULLISH SETUP
+    if h4_bias == "BULLISH" and m5_pa in ["BULLISH_PINBAR", "BULLISH_ENGULFING"]:
+        sl = tf_data['M5']['low'].iloc[-3:].min() * 0.9995
+        risk = price - sl
+        position_units = calculate_position_size(ACCOUNT_BALANCE, RISK_PER_TRADE_PCT, price, sl)
+        
         return {
-            "15m": self.get(symbol, "15m", "5d"),
-            "1h": self.get(symbol, "1h", "14d"),
-            "4h": self.get(symbol, "4h", "30d"),
+            "symbol": symbol,
+            "bias": "BUY (A+ CONFLUENCE)",
+            "price": price,
+            "sl": sl,
+            "tp1": price + (risk * 1.5),
+            "tp2": price + (risk * 3.0),
+            "position_units": position_units,
+            "session": session_name,
+            "df": tf_data['M5'],
+            "pre_news": True if pre_news else False
         }
 
+    # BEARISH SETUP
+    if h4_bias == "BEARISH" and m5_pa in ["BEARISH_PINBAR", "BEARISH_ENGULFING"]:
+        sl = tf_data['M5']['high'].iloc[-3:].max() * 1.0005
+        risk = sl - price
+        position_units = calculate_position_size(ACCOUNT_BALANCE, RISK_PER_TRADE_PCT, price, sl)
 
-feed = DataFeed()
+        return {
+            "symbol": symbol,
+            "bias": "SELL (A+ CONFLUENCE)",
+            "price": price,
+            "sl": sl,
+            "tp1": price - (risk * 1.5),
+            "tp2": price - (risk * 3.0),
+            "position_units": position_units,
+            "session": session_name,
+            "df": tf_data['M5'],
+            "pre_news": True if pre_news else False
+        }
+
+    return None
 
 
-def get_cached_mtf(symbol):
-    now = time.time()
-    if symbol in CACHE and (now - CACHE[symbol]["time"]) < CACHE_TIME:
-        return CACHE[symbol]["data"]
-
-    data = feed.get_mtf(symbol)
-    if data.get("15m") is not None:
-        CACHE[symbol] = {"data": data, "time": now}
-    return data
-
-
-# ========= VECTORIZED STRATEGY ENGINE =========
-class SignalEngine:
-    def __init__(self):
-        self.min_score = 4
-
-    def compute_indicators(self, df):
-        """Pre-calculates all technical indicators across the entire vector."""
-        d = df.copy()
-        d["EMA50"] = d["Close"].ewm(span=50, adjust=False).mean()
-        d["EMA200"] = d["Close"].ewm(span=200, adjust=False).mean()
-        
-        # ATR
-        hl = d["High"] - d["Low"]
-        hc = (d["High"] - d["Close"].shift()).abs()
-        lc = (d["Low"] - d["Close"].shift()).abs()
-        d["ATR"] = pd.concat([hl, hc, lc], axis=1).max(axis=1).rolling(14).mean()
-
-        # RSI
-        delta = d["Close"].diff()
-        gain = delta.where(delta > 0, 0.0).rolling(14).mean()
-        loss = (-delta.where(delta < 0, 0.0)).rolling(14).mean()
-        rs = gain / loss.replace(0, 1e-9)
-        d["RSI"] = 100 - (100 / (1 + rs))
-
-        # MACD
-        ema12 = d["Close"].ewm(span=12, adjust=False).mean()
-        ema26 = d["Close"].ewm(span=26, adjust=False).mean()
-        d["MACD"] = ema12 - ema26
-        d["SIG"] = d["MACD"].ewm(span=9, adjust=False).mean()
-
-        # Volume Average
-        if "Volume" in d.columns and d["Volume"].sum() > 0:
-            d["VOLAVG"] = d["Volume"].rolling(20).mean()
-        else:
-            d["VOLAVG"] = 0
-
-        return d
-
-    def trend(self, df):
-        if df is None or len(df) < 200:
-            return "NEUTRAL"
+# --- POSITION TRACKER WITH RISK BREAKER ---
+async def track_positions(app: Application):
+    global active_trades, daily_stats
+    while True:
         try:
-            e50 = df["Close"].ewm(span=50, adjust=False).mean().iloc[-1]
-            e200 = df["Close"].ewm(span=200, adjust=False).mean().iloc[-1]
-            return "BULLISH" if e50 > e200 else "BEARISH"
-        except Exception:
-            return "NEUTRAL"
+            for trade in list(active_trades):
+                ticker = exchange.fetch_ticker(trade['symbol'])
+                current_price = ticker['last']
+                
+                # BUY Trajectory
+                if "BUY" in trade['bias']:
+                    if current_price >= trade['tp1'] and not trade.get('tp1_hit'):
+                        trade['tp1_hit'] = True
+                        await app.bot.send_message(
+                            chat_id=CHAT_ID, 
+                            text=f"✅ *TP1 HIT (1:1.5 RR)* for `{trade['symbol']}`\nLocking in partials, moving SL to entry.", 
+                            parse_mode="Markdown"
+                        )
+                    elif current_price >= trade['tp2']:
+                        await app.bot.send_message(
+                            chat_id=CHAT_ID, 
+                            text=f"🎯🎯 *TP2 FULL TARGET HIT (1:3 RR)* for `{trade['symbol']}`", 
+                            parse_mode="Markdown"
+                        )
+                        active_trades.remove(trade)
+                    elif current_price <= trade['sl']:
+                        daily_stats['losses_today'] += (ACCOUNT_BALANCE * RISK_PER_TRADE_PCT)
+                        await app.bot.send_message(
+                            chat_id=CHAT_ID, 
+                            text=f"🛑 *STOP LOSS HIT* for `{trade['symbol']}`\nRisk Management logged -1% loss.", 
+                            parse_mode="Markdown"
+                        )
+                        active_trades.remove(trade)
 
-    def analyze(self, df15_raw, df1h, df4h):
-        if df15_raw is None or len(df15_raw) < 200:
-            return None
+                # SELL Trajectory
+                elif "SELL" in trade['bias']:
+                    if current_price <= trade['tp1'] and not trade.get('tp1_hit'):
+                        trade['tp1_hit'] = True
+                        await app.bot.send_message(
+                            chat_id=CHAT_ID, 
+                            text=f"✅ *TP1 HIT (1:1.5 RR)* for `{trade['symbol']}`\nLocking in partials, moving SL to entry.", 
+                            parse_mode="Markdown"
+                        )
+                    elif current_price <= trade['tp2']:
+                        await app.bot.send_message(
+                            chat_id=CHAT_ID, 
+                            text=f"🎯🎯 *TP2 FULL TARGET HIT (1:3 RR)* for `{trade['symbol']}`", 
+                            parse_mode="Markdown"
+                        )
+                        active_trades.remove(trade)
+                    elif current_price >= trade['sl']:
+                        daily_stats['losses_today'] += (ACCOUNT_BALANCE * RISK_PER_TRADE_PCT)
+                        await app.bot.send_message(
+                            chat_id=CHAT_ID, 
+                            text=f"🛑 *STOP LOSS HIT* for `{trade['symbol']}`\nRisk Management logged -1% loss.", 
+                            parse_mode="Markdown"
+                        )
+                        active_trades.remove(trade)
 
-        t4 = self.trend(df4h)
-        t1 = self.trend(df1h)
-
-        if t4 == "NEUTRAL" or t1 == "NEUTRAL" or t4 != t1:
-            return None
-
-        df = self.compute_indicators(df15_raw)
-        last = df.iloc[-1]
-        score = 0
-        reasons = []
-
-        # 1. EMA Trend Confluence
-        if t4 == "BULLISH" and last["Close"] > last["EMA50"] > last["EMA200"]:
-            score += 1
-            reasons.append("EMA Bull Alignment")
-        elif t4 == "BEARISH" and last["Close"] < last["EMA50"] < last["EMA200"]:
-            score += 1
-            reasons.append("EMA Bear Alignment")
-
-        # 2. Momentum
-        if t4 == "BULLISH" and last["RSI"] > 52 and last["MACD"] > last["SIG"]:
-            score += 1
-            reasons.append("RSI+MACD Momentum")
-        elif t4 == "BEARISH" and last["RSI"] < 48 and last["MACD"] < last["SIG"]:
-            score += 1
-            reasons.append("RSI+MACD Momentum")
-
-        # 3. Volume Expansion
-        if last.get("VOLAVG", 0) > 0 and last["Volume"] > last["VOLAVG"] * 1.15:
-            score += 1
-            reasons.append("Volume Spike")
-
-        # Smart Money Concepts Structure Checks
-        if self._fvg(df, t4):
-            score += 1
-            reasons.append("Fair Value Gap")
-        if self._ob(df):
-            score += 1
-            reasons.append("Order Block")
-        if self._bos(df, t4):
-            score += 1
-            reasons.append("Break of Structure")
-        if self._sweep(df, t4):
-            score += 1
-            reasons.append("Liquidity Sweep")
-
-        if not self._valid_session():
-            return None
-
-        if score < self.min_score:
-            return None
-
-        atr = float(last["ATR"])
-        price = float(last["Close"])
-        if pd.isna(atr) or atr <= 0:
-            return None
-
-        if t4 == "BULLISH":
-            return {
-                "type": f"BUY [Score {score}/7]",
-                "price": price,
-                "sl": price - atr * 1.5,
-                "tp": price + atr * 3.0,
-                "score": score,
-                "reasons": ", ".join(reasons)
-            }
-        else:
-            return {
-                "type": f"SELL [Score {score}/7]",
-                "price": price,
-                "sl": price + atr * 1.5,
-                "tp": price - atr * 3.0,
-                "score": score,
-                "reasons": ", ".join(reasons)
-            }
-
-    def _fvg(self, df, trend):
-        try:
-            if trend == "BULLISH":
-                return df["Low"].iloc[-1] > df["High"].iloc[-3]
-            return df["High"].iloc[-1] < df["Low"].iloc[-3]
-        except Exception:
-            return False
-
-    def _ob(self, df):
-        try:
-            body = abs(df["Close"].iloc[-1] - df["Open"].iloc[-1])
-            return body > df["ATR"].iloc[-1] * 0.75
-        except Exception:
-            return False
-
-    def _bos(self, df, trend):
-        try:
-            if trend == "BULLISH":
-                return df["High"].iloc[-1] > df["High"].iloc[-2]
-            return df["Low"].iloc[-1] < df["Low"].iloc[-2]
-        except Exception:
-            return False
-
-    def _sweep(self, df, trend):
-        try:
-            recent_low = df["Low"].iloc[-10:-1].min()
-            recent_high = df["High"].iloc[-10:-1].max()
-            if trend == "BULLISH":
-                return df["Low"].iloc[-1] < recent_low and df["Close"].iloc[-1] > recent_low
-            return df["High"].iloc[-1] > recent_high and df["Close"].iloc[-1] < recent_high
-        except Exception:
-            return False
-
-    def _valid_session(self):
-        """Active liquidity windows: London & New York sessions (UTC)."""
-        hour = datetime.now(timezone.utc).hour
-        return hour in {7, 8, 9, 10, 12, 13, 14, 15, 16, 17, 18, 19}
-
-
-class RiskManager:
-    def validate(self, s):
-        if not s:
-            return False
-        risk = abs(s["price"] - s["sl"])
-        reward = abs(s["tp"] - s["price"])
-        if risk == 0:
-            return False
-        return (reward / risk) >= MIN_RRR
-
-
-# ========= INSTANTIATIONS =========
-tg = Telegram()
-engine = SignalEngine()
-risk = RiskManager()
-running = True
-
-
-# ========= OPTIMIZED VECTORIZED BACKTEST ENGINE =========
-def backtest_fast(symbol):
-    start = time.time()
-    mtf = get_cached_mtf(symbol)
-    df = mtf.get("15m") if mtf else None
-    if df is None or len(df) < 250:
-        return "Insufficient data available for backtesting."
-
-    # Compute indicators ONCE for the whole dataset
-    df_calc = engine.compute_indicators(df)
-    wins = losses = 0
-
-    for i in range(200, len(df_calc) - 15):
-        # Pass vector slices without triggering indicator recalculations
-        sig = engine.analyze(df_calc.iloc[:i], mtf["1h"], mtf["4h"])
-        if not sig:
-            continue
-
-        future = df_calc.iloc[i:i+12]
-        if "BUY" in sig["type"]:
-            hit_tp = (future["High"] >= sig["tp"]).any()
-            hit_sl = (future["Low"] <= sig["sl"]).any()
-        else:
-            hit_tp = (future["Low"] <= sig["tp"]).any()
-            hit_sl = (future["High"] >= sig["sl"]).any()
-
-        if hit_tp:
-            wins += 1
-        elif hit_sl:
-            losses += 1
-
-    total = wins + losses
-    wr = (wins / total * 100) if total > 0 else 0.0
-    elapsed = time.time() - start
-    return (
-        f"📊 *Vector Backtest Result: {symbol}*\n"
-        f"━━━━━━━━━━━━━━━━━━━\n"
-        f"Total Trades: `{total}`\n"
-        f"Wins: `{wins}` | Losses: `{losses}`\n"
-        f"Winrate: *{wr:.1f}%*\n"
-        f"Execution Time: `{elapsed:.2f}s`"
-    )
-
-
-# ========= TELEGRAM COMMAND HANDLER =========
-def handle_cmd(text, chat_id):
-    low = text.lower().strip()
-
-    if low.startswith("/start"):
-        tg.send(
-            "🔥 *StarFx Institutional Engine V9.0*\n"
-            "━━━━━━━━━━━━━━━━━━━━━━\n"
-            "/status - Bot health & parameters\n"
-            "/stats - Total historical signals\n"
-            "/scan - Run immediate market scan\n"
-            "/backtest EURUSD - Backtest vector model\n"
-            "/score 5 - Adjust confluence threshold (3-7)\n"
-            "/price - Live Gold spot pricing",
-            chat_id
-        )
-
-    elif low.startswith("/status"):
-        cached = ", ".join(CACHE.keys()) if CACHE else "Empty Cache"
-        tg.send(
-            f"🟢 *System Operational*\n"
-            f"Database: `{'PostgreSQL' if db.is_postgres else 'SQLite'}`\n"
-            f"Min Confluence Score: `{engine.min_score}/7`\n"
-            f"Active Cache: `{cached}`\n"
-            f"Signal Cooldown: `{COOLDOWN_MINUTES}m`",
-            chat_id
-        )
-
-    elif low.startswith(("/stats", "/performance")):
-        total = db.get_total_count()
-        tg.send(f"📈 Total Executed Signals: `{total}`\nCurrent Min Score: `{engine.min_score}/7`", chat_id)
-
-    elif low.startswith(("/scan", "/signal")):
-        tg.send("🔍 Scanning multi-timeframe liquidity...", chat_id)
-        found = 0
-        for sym in SYMBOLS:
-            try:
-                mtf = get_cached_mtf(sym)
-                if not mtf:
-                    continue
-                sig = engine.analyze(mtf["15m"], mtf["1h"], mtf["4h"])
-                if sig and risk.validate(sig):
-                    base = sig["type"].split("[")[0].strip()
-                    if not db.is_duplicate(sym, base, COOLDOWN_MINUTES):
-                        tg.send_signal(sym, sig)
-                        db.save(sym, base, sig["price"], sig["score"], sig["reasons"])
-                        found += 1
-            except Exception as e:
-                logging.error(f"Scan failure on {sym}: {e}")
-
-        if found == 0:
-            tg.send("✅ No high-confluence setups detected.\nAdjust threshold via `/score 3` if required.", chat_id)
-        else:
-            tg.send(f"⚡ Successfully broadcasted {found} setup(s).", chat_id)
-
-    elif low.startswith("/backtest"):
-        parts = low.split()
-        raw = parts[1].upper() if len(parts) > 1 else "EURUSD"
-        sym = "frx" + raw.replace("FRX", "") if not raw.startswith("FRX") else raw.lower()
-        tg.send(f"⏳ Running vectorized engine backtest on `{sym}`...", chat_id)
-        tg.send(backtest_fast(sym), chat_id)
-
-    elif low.startswith("/score"):
-        try:
-            ns = int(low.split()[1])
-            if 3 <= ns <= 7:
-                engine.min_score = ns
-                mode = "SNIPER MODE" if ns >= 6 else "BALANCED MODE" if ns >= 4 else "HIGH FREQUENCY"
-                tg.send(f"✅ Confluence filter adjusted to `{ns}/7` [{mode}]", chat_id)
-            else:
-                tg.send("⚠️ Please specify a score between 3 and 7.", chat_id)
-        except Exception:
-            tg.send("Usage: `/score 5`", chat_id)
-
-    elif low.startswith("/price"):
-        try:
-            mtf = get_cached_mtf("frxXAUUSD")
-            if mtf and mtf.get("15m") is not None:
-                price = float(mtf["15m"]["Close"].iloc[-1])
-                tg.send(f"💰 *XAUUSD Spot*: `{price:.2f}`", chat_id)
-            else:
-                tg.send("Fetching current market price...", chat_id)
+            await asyncio.sleep(10)
         except Exception as e:
-            logging.error(f"Price check error: {e}")
-            tg.send("Unable to resolve price data.", chat_id)
+            print(f"Tracking Loop Exception: {e}")
+            await asyncio.sleep(10)
 
 
-def cmd_listener():
-    offset = 0
-    bot_id = 0
-    try:
-        me = requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getMe", timeout=10).json()
-        bot_id = me.get("result", {}).get("id", 0)
-    except Exception as e:
-        logging.warning(f"Failed Telegram authentication check: {e}")
-
-    logging.info(f"Command poller initialized (Bot ID: {bot_id})")
-
-    while running:
+# --- DAILY REPORT (23:00 EAT) ---
+async def schedule_daily_report(app: Application):
+    while True:
         try:
-            url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates?offset={offset}&timeout=20"
-            r = requests.get(url, timeout=25).json()
-                        for update in r.get("result", []):
-                offset = update["update_id"] + 1
-                msg = update.get("message")
-                if not msg:
-                    continue
-                if msg.get("from", {}).get("id") == bot_id or msg.get("from", {}).get("is_bot"):
-                    continue
-                text = msg.get("text", "")
-                chat_id = msg.get("chat", {}).get("id")
-                if text and text.startswith("/"):
-                    handle_cmd(text, chat_id)
+            now = datetime.now(timezone.utc)
+            # 23:00 EAT = 20:00 UTC
+            if now.hour == 20 and now.minute == 0:
+                report = "📊 *23:00 EAT DAILY INSTITUTIONAL REPORT*\n\n"
+                for sym in SYMBOLS:
+                    df = fetch_data(sym, '1d', limit=5)
+                    report += f"**{sym}:** Price: `{df['close'].iloc[-1]:.2f}` | High: `{df['high'].iloc[-1]:.2f}` | Low: `{df['low'].iloc[-1]:.2f}`\n"
+                
+                report += f"\n🛡️ *Risk Management Summary:*\n• Daily Drawdown Logged: `${daily_stats['losses_today']:.2f}` / `${ACCOUNT_BALANCE * MAX_DAILY_LOSS_PCT:.2f}`"
+                
+                await app.bot.send_message(chat_id=CHAT_ID, text=report, parse_mode="Markdown")
+                await asyncio.sleep(60)
+            await asyncio.sleep(20)
         except Exception as e:
-            logging.error(f"Polling loop exception: {e}")
-        time.sleep(1.0)
-    
-# ========= MAIN EXECUTION LOOP =========
-def signal_handler(sig, frame):
-    global running
-    logging.info("Shutting down StarFx Engine...")
-    running = False
+            print(f"Report Scheduler Error: {e}")
+            await asyncio.sleep(10)
 
+
+# --- MAIN MARKET SCANNER ---
+async def market_scanner(app: Application):
+    print("Market Scanner Operational (Signals start at 09:00 EAT)...")
+    last_processed_m5 = {}
+
+    while True:
+        try:
+            for symbol in SYMBOLS:
+                m5_df = fetch_data(symbol, '5m', limit=5)
+                current_m5_time = m5_df.index[-1]
+
+                if last_processed_m5.get(symbol) != current_m5_time:
+                    last_processed_m5[symbol] = current_m5_time
+
+                    setup = evaluate_aplus_setup(symbol)
+                    if setup:
+                        active_trades.append(setup)
+
+                        chart_file = generate_tradingview_chart(setup['df'], symbol, setup)
+
+                        news_tag = "⚡ *PRE-NEWS ACCUMULATION*" if setup['pre_news'] else "🔥 *A+ STANDARD CONFLUENCE*"
+                        caption = (
+                            f"🎯 *PRECISION A+ SNIPER SIGNAL* 🎯\n\n"
+                            f"**Asset:** `{setup['symbol']}`\n"
+                            f"**Active Session:** `{setup['session']}`\n"
+                            f"**Setup Type:** {news_tag}\n"
+                            f"**Action:** `{setup['bias']}`\n\n"
+                            f"📍 *Execution Parameters:*\n"
+                            f"• **Entry Price:** `{setup['price']:.2f}`\n"
+                            f"• **Stop Loss:** `{setup['sl']:.2f}`\n"
+                            f"• **TP1 (Partial 1:1.5 RR):** `{setup['tp1']:.2f}`\n"
+                            f"• **TP2 (Full 1:3.0 RR):** `{setup['tp2']:.2f}`\n\n"
+                            f"🛡️ *Risk Management Metrics:*\n"
+                            f"• **Rec. Position Size:** `{setup['position_units']} Units` (Risk: 1.0% Equity)\n"
+                            f"• **Max Allowed Risk per Trade:** `${ACCOUNT_BALANCE * RISK_PER_TRADE_PCT:.2f}`"
+                        )
+
+                        with open(chart_file, "rb") as photo:
+                            await app.bot.send_photo(
+                                chat_id=CHAT_ID, 
+                                photo=photo, 
+                                caption=caption, 
+                                parse_mode="Markdown"
+                            )
+
+                        if os.path.exists(chart_file):
+                            os.remove(chart_file)
+
+            await asyncio.sleep(15)
+        except Exception as e:
+            print(f"Scanner Exception: {e}")
+            await asyncio.sleep(10)
+
+
+# --- MAIN ENTRY POINT ---
+def main():
+    app = Application.builder().token(TELEGRAM_TOKEN).build()
+
+    loop = asyncio.get_event_loop()
+    loop.create_task(market_scanner(app))
+    loop.create_task(track_positions(app))
+    loop.create_task(schedule_daily_report(app))
+
+    print("Adaptive Bot Application Online...")
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
-
-    # Start Health Check Server Thread
-    health_thread = threading.Thread(target=start_health_server, daemon=True)
-    health_thread.start()
-
-    # Start Telegram Command Listener Thread
-    listener_thread = threading.Thread(target=cmd_listener, daemon=True)
-    listener_thread.start()
-
-    logging.info("StarFx Engine fully booted. Active monitoring sequence started.")
-
-    while running:
-        for sym in SYMBOLS:
-            try:
-                mtf = get_cached_mtf(sym)
-                if not mtf:
-                    continue
-                sig = engine.analyze(mtf["15m"], mtf["1h"], mtf["4h"])
-                if sig and risk.validate(sig):
-                    base = sig["type"].split("[")[0].strip()
-                    if not db.is_duplicate(sym, base, COOLDOWN_MINUTES):
-                        tg.send_signal(sym, sig)
-                        db.save(sym, base, sig["price"], sig["score"], sig["reasons"])
-            except Exception as e:
-                logging.error(f"Execution error on {sym}: {e}")
-
-        time.sleep(SCAN_INTERVAL)
-                
+    main()
