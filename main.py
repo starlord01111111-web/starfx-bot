@@ -36,7 +36,7 @@ CACHE = {}
 CACHE_TIME = 600
 
 
-# ========= HEALTH SERVER (for Render) =========
+# ========= HEALTH SERVER (Required for Render) =========
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -45,7 +45,7 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"StarFx Bot is running")
 
     def log_message(self, format, *args):
-        return  # silence access logs
+        return
 
 
 def start_health_server():
@@ -76,7 +76,7 @@ class Database:
         """)
         self.conn.commit()
 
-    def is_duplicate(self, symbol: str, signal_type: str, cooldown: int) -> bool:
+    def is_duplicate(self, symbol, signal_type, cooldown):
         cur = self.conn.cursor()
         cur.execute(
             "SELECT 1 FROM signals WHERE symbol=? AND type=? AND created_at > datetime('now', ?)",
@@ -84,7 +84,7 @@ class Database:
         )
         return cur.fetchone() is not None
 
-    def save(self, symbol: str, signal_type: str, price: float, score: int, reasons: str):
+    def save(self, symbol, signal_type, price, score, reasons):
         self.conn.execute(
             "INSERT INTO signals (symbol, type, price, score, reasons) VALUES (?,?,?,?,?)",
             (symbol, signal_type, price, score, reasons)
@@ -100,7 +100,7 @@ class Telegram:
     def __init__(self):
         self.url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
-    def send(self, text: str, chat_id=None):
+    def send(self, text, chat_id=None):
         target = chat_id if chat_id else CHANNEL_ID
         if not BOT_TOKEN or not target:
             return
@@ -111,27 +111,27 @@ class Telegram:
                 timeout=10
             )
         except Exception as e:
-            logging.error(f"Telegram send error: {e}")
+            logging.error(f"Telegram error: {e}")
 
-    def send_signal(self, symbol: str, s: dict):
+    def send_signal(self, symbol, s):
         msg = (
             f"🚀 *{symbol} {s['type']}*\n"
             f"Price: `{s['price']:.5f}`\n"
             f"SL: `{s['sl']:.5f}` | TP: `{s['tp']:.5f}`\n"
             f"Score: {s['score']}/7 | {s['reasons']}\n"
-            f"RRR ≥ {MIN_RRR} | V8.4 FIXED"
+            f"RRR ≥ {MIN_RRR} | V8.5 CLEAN"
         )
         self.send(msg)
 
 
 # ========= DATA FEED =========
 class DataFeed:
-    def _flatten(self, df: pd.DataFrame) -> pd.DataFrame:
+    def _flatten(self, df):
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
         return df
 
-    def get(self, symbol: str, interval: str, period: str, retries: int = 3):
+    def get(self, symbol, interval, period, retries=3):
         yahoo = MAP.get(symbol)
         if not yahoo:
             return None
@@ -148,26 +148,25 @@ class DataFeed:
                 )
                 if df is not None and not df.empty and len(df) > 50:
                     df = self._flatten(df)
-                    required = ["Open", "High", "Low", "Close"]
-                    if all(c in df.columns for c in required):
+                    if all(col in df.columns for col in ["Open", "High", "Low", "Close"]):
                         return df
             except Exception as e:
-                logging.warning(f"Download failed {symbol} {interval}: {e}")
+                logging.warning(f"Download error {symbol} {interval}: {e}")
                 time.sleep(1.5 * (attempt + 1))
         return None
 
-    def get_mtf(self, symbol: str) -> dict:
+    def get_mtf(self, symbol):
         return {
             "15m": self.get(symbol, "15m", "7d"),
-            "1h":  self.get(symbol, "1h",  "15d"),
-            "4h":  self.get(symbol, "4h",  "30d"),
+            "1h": self.get(symbol, "1h", "15d"),
+            "4h": self.get(symbol, "4h", "30d"),
         }
 
 
 feed = DataFeed()
 
 
-def get_cached_mtf(symbol: str) -> dict:
+def get_cached_mtf(symbol):
     now = time.time()
     if symbol in CACHE and (now - CACHE[symbol]["time"]) < CACHE_TIME:
         return CACHE[symbol]["data"]
@@ -194,10 +193,10 @@ class SignalEngine:
             return None
 
         df = df15.copy()
-        df["EMA50"]  = df["Close"].ewm(span=50, adjust=False).mean()
+        df["EMA50"] = df["Close"].ewm(span=50, adjust=False).mean()
         df["EMA200"] = df["Close"].ewm(span=200, adjust=False).mean()
-        df["ATR"]    = self.atr(df)
-        df["RSI"]    = self.rsi(df["Close"])
+        df["ATR"] = self.atr(df)
+        df["RSI"] = self.rsi(df["Close"])
         df["MACD"], df["SIG"] = self.macd(df["Close"])
 
         if "Volume" in df.columns and df["Volume"].sum() > 0:
@@ -209,6 +208,7 @@ class SignalEngine:
         score = 0
         reasons = []
 
+        # EMA Structure
         if t4 == "BULLISH" and last["Close"] > last["EMA50"] > last["EMA200"]:
             score += 1
             reasons.append("EMA Bull")
@@ -216,6 +216,7 @@ class SignalEngine:
             score += 1
             reasons.append("EMA Bear")
 
+        # Momentum
         if t4 == "BULLISH" and last["RSI"] > 55 and last["MACD"] > last["SIG"]:
             score += 1
             reasons.append("RSI+MACD")
@@ -223,10 +224,12 @@ class SignalEngine:
             score += 1
             reasons.append("RSI+MACD")
 
+        # Volume
         if last.get("VOLAVG", 0) > 0 and last["Volume"] > last["VOLAVG"] * 1.2:
             score += 1
             reasons.append("Vol")
 
+        # Structure Concepts
         if self.fvg(df, t4):
             score += 1
             reasons.append("FVG")
@@ -248,7 +251,6 @@ class SignalEngine:
 
         atr = float(last["ATR"])
         price = float(last["Close"])
-
         if atr <= 0:
             return None
 
@@ -271,80 +273,77 @@ class SignalEngine:
                 "reasons": ", ".join(reasons)
             }
 
-    def trend(self, df) -> str:
+    def trend(self, df):
         if df is None or len(df) < 200:
             return "NEUTRAL"
         try:
-            e50  = df["Close"].ewm(span=50, adjust=False).mean().iloc[-1]
+            e50 = df["Close"].ewm(span=50, adjust=False).mean().iloc[-1]
             e200 = df["Close"].ewm(span=200, adjust=False).mean().iloc[-1]
             return "BULLISH" if e50 > e200 else "BEARISH"
-        except Exception:
+        except:
             return "NEUTRAL"
 
-    def atr(self, df, period: int = 14) -> pd.Series:
-        high_low = df["High"] - df["Low"]
-        high_close = (df["High"] - df["Close"].shift()).abs()
-        low_close = (df["Low"] - df["Close"].shift()).abs()
-        tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    def atr(self, df, period=14):
+        hl = df["High"] - df["Low"]
+        hc = (df["High"] - df["Close"].shift()).abs()
+        lc = (df["Low"] - df["Close"].shift()).abs()
+        tr = pd.concat([hl, hc, lc], axis=1).max(axis=1)
         return tr.rolling(period).mean()
 
-    def rsi(self, series: pd.Series, period: int = 14) -> pd.Series:
+    def rsi(self, series, period=14):
         delta = series.diff()
         gain = delta.where(delta > 0, 0.0).rolling(period).mean()
         loss = (-delta.where(delta < 0, 0.0)).rolling(period).mean()
         rs = gain / loss
         return 100 - (100 / (1 + rs))
 
-    def macd(self, series: pd.Series):
+    def macd(self, series):
         ema12 = series.ewm(span=12, adjust=False).mean()
         ema26 = series.ewm(span=26, adjust=False).mean()
         macd_line = ema12 - ema26
         signal = macd_line.ewm(span=9, adjust=False).mean()
         return macd_line, signal
 
-    def fvg(self, df, trend: str) -> bool:
+    def fvg(self, df, trend):
         try:
             if trend == "BULLISH":
                 return df["Low"].iloc[-1] > df["High"].iloc[-3]
-            else:
-                return df["High"].iloc[-1] < df["Low"].iloc[-3]
-        except Exception:
+            return df["High"].iloc[-1] < df["Low"].iloc[-3]
+        except:
             return False
 
-    def ob(self, df) -> bool:
+    def ob(self, df):
         try:
             body = abs(df["Close"].iloc[-1] - df["Open"].iloc[-1])
             return body > df["ATR"].iloc[-1] * 0.8
-        except Exception:
+        except:
             return False
 
-    def bos(self, df, trend: str) -> bool:
+    def bos(self, df, trend):
         try:
             if trend == "BULLISH":
                 return df["High"].iloc[-1] > df["High"].iloc[-2]
-            else:
-                return df["Low"].iloc[-1] < df["Low"].iloc[-2]
-        except Exception:
+            return df["Low"].iloc[-1] < df["Low"].iloc[-2]
+        except:
             return False
 
-    def sweep(self, df, trend: str) -> bool:
+    def sweep(self, df, trend):
         try:
-            recent_low  = df["Low"].iloc[-10:-1].min()
+            recent_low = df["Low"].iloc[-10:-1].min()
             recent_high = df["High"].iloc[-10:-1].max()
             if trend == "BULLISH":
                 return df["Low"].iloc[-1] < recent_low and df["Close"].iloc[-1] > recent_low
-            else:
-                return df["High"].iloc[-1] > recent_high and df["Close"].iloc[-1] < recent_high
-        except Exception:
+            return df["High"].iloc[-1] > recent_high and df["Close"].iloc[-1] < recent_high
+        except:
             return False
 
-    def valid_session(self) -> bool:
+    def valid_session(self):
         hour = datetime.utcnow().hour
         return hour in {7, 8, 9, 10, 12, 13, 14, 15, 16}
 
 
 class Risk:
-    def validate(self, s: dict) -> bool:
+    def validate(self, s):
         if not s:
             return False
         risk = abs(s["price"] - s["sl"])
@@ -362,7 +361,7 @@ running = True
 
 
 # ========= BACKTEST =========
-def backtest_fast(symbol: str) -> str:
+def backtest_fast(symbol):
     start = time.time()
     mtf = get_cached_mtf(symbol)
     df = mtf.get("15m")
@@ -370,21 +369,17 @@ def backtest_fast(symbol: str) -> str:
         return "No sufficient data"
 
     wins = losses = 0
-
     for i in range(200, len(df) - 15):
         sig = engine.analyze(df.iloc[:i], mtf["1h"], mtf["4h"])
         if not sig:
             continue
-
-        future = df.iloc[i : i + 12]
-
+        future = df.iloc[i:i+12]
         if "BUY" in sig["type"]:
             hit_tp = (future["High"] >= sig["tp"]).any()
-            hit_sl = (future["Low"]  <= sig["sl"]).any()
+            hit_sl = (future["Low"] <= sig["sl"]).any()
         else:
-            hit_tp = (future["Low"]  <= sig["tp"]).any()
+            hit_tp = (future["Low"] <= sig["tp"]).any()
             hit_sl = (future["High"] >= sig["sl"]).any()
-
         if hit_tp:
             wins += 1
         elif hit_sl:
@@ -395,15 +390,15 @@ def backtest_fast(symbol: str) -> str:
     elapsed = time.time() - start
     return (
         f"📊 *Backtest {symbol}*\n"
-        f"Total trades: {total}\n"
+        f"Total: {total}\n"
         f"Wins: {wins} | Losses: {losses}\n"
         f"Winrate: {wr:.1f}%\n"
         f"Time: {elapsed:.1f}s"
     )
 
 
-# ========= COMMAND HANDLER =========
-def handle_cmd(text: str, chat_id):
+# ========= COMMANDS =========
+def handle_cmd(text, chat_id):
     low = text.lower().strip()
 
     if "V8." in text and "/" in text and len(text) > 20:
@@ -411,26 +406,25 @@ def handle_cmd(text: str, chat_id):
 
     if low.startswith("/start"):
         tg.send(
-            "🔥 *V8.4 FIXED LIVE*\n"
-            "/status – bot status\n"
-            "/stats – total signals\n"
-            "/scan or /signal – force scan\n"
+            "🔥 *V8.5 CLEAN LIVE*\n"
+            "/status - bot status\n"
+            "/stats - total signals\n"
+            "/scan or /signal - force scan\n"
             "/backtest EURUSD\n"
             "/backtest XAUUSD\n"
-            "/score 3 – more signals\n"
-            "/score 6 – sniper mode\n"
-            "/price – current Gold price",
+            "/score 3 - more signals\n"
+            "/score 6 - sniper mode\n"
+            "/price - Gold price",
             chat_id
         )
 
     elif low.startswith("/status"):
-        cached = ", ".join(CACHE.keys()) if CACHE else "Empty – run /scan"
+        cached = ", ".join(CACHE.keys()) if CACHE else "Empty - run /scan"
         tg.send(
-            f"🟢 *V8.4 Running*\n"
+            f"🟢 *V8.5 Running*\n"
             f"Min score: {engine.min_score}/7\n"
             f"Cache: {cached}\n"
-            f"Cooldown: {COOLDOWN_MINUTES}m\n"
-            f"DM replies: OK",
+            f"Cooldown: {COOLDOWN_MINUTES}m",
             chat_id
         )
 
@@ -438,14 +432,10 @@ def handle_cmd(text: str, chat_id):
         cur = db.conn.cursor()
         cur.execute("SELECT COUNT(*) FROM signals")
         total = cur.fetchone()[0]
-        tg.send(
-            f"📈 Total signals saved: {total}\n"
-            f"Current score filter: {engine.min_score}/7",
-            chat_id
-        )
+        tg.send(f"📈 Total signals: {total}\nScore filter: {engine.min_score}/7", chat_id)
 
     elif low.startswith(("/scan", "/signal")):
-        tg.send("🔍 Scanning…", chat_id)
+        tg.send("🔍 Scanning...", chat_id)
         found = 0
         for sym in SYMBOLS:
             try:
@@ -457,29 +447,20 @@ def handle_cmd(text: str, chat_id):
                         tg.send_signal(sym, sig)
                         db.save(sym, base, sig["price"], sig["score"], sig["reasons"])
                         found += 1
-                        logging.info(f"Signal sent: {sym} {sig['type']}")
             except Exception as e:
                 logging.error(f"Scan error {sym}: {e}")
 
         if found == 0:
-            tg.send(
-                "✅ Scan finished – no A+ setup right now.\n"
-                "Market may be ranging. Try `/score 3` for more signals.",
-                chat_id
-            )
+            tg.send("✅ No A+ setup right now.\nTry `/score 3` for more signals.", chat_id)
         else:
-            tg.send(f"⚡ Done – {found} signal(s) sent to channel", chat_id)
+            tg.send(f"⚡ Sent {found} signal(s)", chat_id)
 
     elif low.startswith("/backtest"):
         parts = low.split()
         raw = parts[1].upper() if len(parts) > 1 else "EURUSD"
-        if not raw.startswith("FRX"):
-            sym = "frx" + raw.replace("FRX", "")
-        else:
-            sym = raw.lower()
-        tg.send(f"⏳ Backtesting {sym}…", chat_id)
-        result = backtest_fast(sym)
-        tg.send(result, chat_id)
+        sym = "frx" + raw.replace("FRX", "") if not raw.startswith("FRX") else raw.lower()
+        tg.send(f"⏳ Backtesting {sym}...", chat_id)
+        tg.send(backtest_fast(sym), chat_id)
 
     elif low.startswith("/score"):
         try:
@@ -487,10 +468,10 @@ def handle_cmd(text: str, chat_id):
             if 3 <= ns <= 7:
                 engine.min_score = ns
                 mode = "SNIPER" if ns >= 6 else "BALANCED" if ns >= 4 else "LOOSE"
-                tg.send(f"✅ Min score set to {ns}/7 → {mode}", chat_id)
+                tg.send(f"✅ Score set to {ns}/7 → {mode}", chat_id)
             else:
-                tg.send("Score must be between 3 and 7", chat_id)
-        except Exception:
+                tg.send("Use score between 3 and 7", chat_id)
+        except:
             tg.send("Usage: /score 4", chat_id)
 
     elif low.startswith("/price"):
@@ -500,13 +481,12 @@ def handle_cmd(text: str, chat_id):
                 price = float(mtf["15m"]["Close"].iloc[-1])
                 tg.send(f"💰 *XAUUSD*: `{price:.2f}`", chat_id)
             else:
-                tg.send("Price data not ready – try again in \~30s", chat_id)
+                tg.send("Price data not ready - try again in \~30s", chat_id)
         except Exception as e:
-            logging.error(f"Price command error: {e}")
-            tg.send("Price error – try /scan first", chat_id)
+            logging.error(f"Price error: {e}")
+            tg.send("Price error - try /scan first", chat_id)
 
 
-# ========= COMMAND LISTENER =========
 def cmd_listener():
     offset = 0
     bot_id = 0
@@ -527,23 +507,17 @@ def cmd_listener():
                 msg = update.get("message")
                 if not msg:
                     continue
-                if msg.get("from", {}).get("id") == bot_id:
+                if msg.get("from", {}).get("id") == bot_id or msg.get("from", {}).get("is_bot"):
                     continue
-                if msg.get("from", {}).get("is_bot"):
-                    continue
-
                 text = msg.get("text", "")
                 chat_id = msg.get("chat", {}).get("id")
-                if not text or not text.startswith("/"):
-                    continue
-
-                handle_cmd(text, chat_id)
+                if text and text.startswith("/"):
+                    handle_cmd(text, chat_id)
         except Exception as e:
             logging.error(f"Listener error: {e}")
         time.sleep(1.5)
 
 
-# ========= SHUTDOWN =========
 def shutdown(signum, frame):
     global running
     running = False
@@ -557,15 +531,15 @@ signal.signal(signal.SIGTERM, shutdown)
 # ========= MAIN =========
 if __name__ == "__main__":
     if not BOT_TOKEN:
-        logging.warning("BOT_TOKEN is empty – Telegram features disabled")
+        logging.warning("BOT_TOKEN is empty")
 
     # Start health server for Render
     threading.Thread(target=start_health_server, daemon=True).start()
 
-    tg.send("✅ *V8.4 FIXED LIVE*\nDM replies working | /scan ready\nType /start in bot DM")
+    tg.send("✅ *V8.5 CLEAN LIVE*\nType /start in bot DM")
 
     threading.Thread(target=cmd_listener, daemon=True).start()
-    logging.info("V8.4 FIXED started")
+    logging.info("V8.5 CLEAN started")
 
     while running:
         try:
