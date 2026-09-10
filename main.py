@@ -94,14 +94,10 @@ def run_bot():
 
 if __name__ == "__main__":
 
-    # Run trading bot
-    threading.Thread(target=run_bot, daemon=True).start()
-
-    # HTTP server for Render health checks
     port = int(os.environ.get("PORT", 10000))
 
     server = HTTPServer(("0.0.0.0", port), Handler)
 
     print(f"Listening on port {port}")
 
-    server.serve_forever()
+    run_bot()   # Run directly instead of in a thread
