@@ -29,96 +29,87 @@ class MarketData:
 
     def _download(self, ticker, period, interval):
 
-        if self.paused():
-            return None
+    if self.paused():
+        return None
 
-        key = f"{ticker}_{period}_{interval}"
+    key = f"{ticker}_{period}_{interval}"
+    now = time.time()
 
-        now = time.time()
+    if key in self.cache:
+        cached = self.cache[key]
+        if now - cached["time"] < config.CACHE_SECONDS:
+            return cached["data"]
 
-        if key in self.cache:
+    delay = 1
 
-            cached = self.cache[key]
+    for attempt in range(config.YAHOO_RETRIES):
 
-            if now - cached["time"] < config.CACHE_SECONDS:
-                return cached["data"]
+        try:
 
-        delay = 1
+            print(f"Downloading {ticker} ({interval})")
 
-        for attempt in range(config.YAHOO_RETRIES):
+            df = yf.download(
+                ticker=ticker,
+                period=period,
+                interval=interval,
+                progress=False,
+                auto_adjust=False,
+                threads=False,
+                timeout=20
+            )
 
-            try:
+            if len(df) == 0:
+                print(f"No data returned for {ticker}")
+                raise Exception("Empty dataframe")
 
-         df = yf.download(
-    ticker=ticker,
-    period=period,
-    interval=interval,
-    progress=False,
-    auto_adjust=False,
-    threads=False,
-    timeout=20
-         ) print(f"Downloading {ticker} {interval}")      
-                    
-                
-                
-                
-                
-                
-                
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
 
-                if len(df) == 0: print(f"No data returned for {ticker}")
-                    raise Exception("Empty dataframe")
+            df = df.rename(columns=str.title)
 
-                if isinstance(df.columns, pd.MultiIndex):
-                    df.columns = df.columns.get_level_values(0)
+            required = [
+                "Open",
+                "High",
+                "Low",
+                "Close",
+                "Volume"
+            ]
 
-                df = df.rename(columns=str.title)
+            for col in required:
+                if col not in df.columns:
+                    raise Exception(f"Missing column {col}")
 
-                required = [
-                    "Open",
-                    "High",
-                    "Low",
-                    "Close",
-                    "Volume"
-                ]
+            df.dropna(inplace=True)
 
-                for col in required:
+            self.cache[key] = {
+                "time": now,
+                "data": df
+            }
 
-                    if col not in df.columns:
-                        raise Exception(f"Missing column {col}")
+            return df
 
-                df.dropna(inplace=True)
+        except Exception as e:
 
-                self.cache[key] = {
+            print(f"[ERROR] {ticker} ({interval}): {e}")
 
-                    "time": now,
+            import traceback
+            traceback.print_exc()
 
-                    "data": df
+            time.sleep(delay + random.random())
+            delay *= 2
 
-                }
+    self.pause_until = datetime.utcnow() + timedelta(
+        minutes=config.YAHOO_PAUSE_MINUTES
+    )
 
-                return df
+    print("=" * 60)
+    print("⚠️ Yahoo Finance rate limit reached!")
+    print(f"Bot paused until: {self.pause_until}")
+    print("No market data will be downloaded during this period.")
+    print("=" * 60)
 
-            except Exception as e:
-    print(f"[ERROR] {ticker} ({interval}): {e}")
+    return None
 
-    import traceback
-    traceback.print_exc()
-
-    time.sleep(delay + random.random())
-    delay *= 2
-        
-      self.pause_until = datetime.utcnow() + timedelta(
-    minutes=config.YAHOO_PAUSE_MINUTES
-)
-
-print("=" * 60)
-print("⚠️ Yahoo Finance rate limit reached!")
-print(f"Bot paused until: {self.pause_until}")
-print("No market data will be downloaded during this period.")
-print("=" * 60)
-
-return None  
         
 
         
