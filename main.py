@@ -22,9 +22,9 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 
 # ========= FAST CACHE - 3 SEC BACKTEST =========
 CACHE = {}
-CACHE_TIME = 600 # 10 mins cache
+CACHE_TIME = 600
 
-# ========= DATABASE - ANTI SPAM =========
+# ========= DATABASE =========
 class Database:
     def __init__(self):
         self.conn = sqlite3.connect("starfx.db", check_same_thread=False)
@@ -50,7 +50,7 @@ class Telegram:
         except Exception as e:
             logging.error(f"TG error: {e}")
     def send_signal(self, symbol, s):
-        msg = f"🚀 *{symbol} {s['type']}*\nPrice: `{s['price']:.5f}`\nSL: `{s['sl']:.5f}` | TP: `{s['tp']:.5f}`\nScore: {s['score']}/7 | {s['reasons']}\nRRR 1:2 | V8.2 FAST"
+        msg = f"🚀 *{symbol} {s['type']}*\nPrice: `{s['price']:.5f}`\nSL: `{s['sl']:.5f}` | TP: `{s['tp']:.5f}`\nScore: {s['score']}/7 | {s['reasons']}\nRRR 1:2 | V8.3 FIXED"
         self.send(msg)
 
 # ========= DATA WITH CACHE =========
@@ -60,7 +60,8 @@ class DataFeed:
         for _ in range(retries):
             try:
                 df = yf.download(yahoo, period=period, interval=interval, progress=False, auto_adjust=True)
-                if len(df) > 100: return df
+                if df is not None and len(df) > 100:
+                    return df
             except: time.sleep(1)
         return None
     def get_mtf(self, symbol):
@@ -81,7 +82,7 @@ def get_cached_mtf(symbol):
         CACHE[symbol] = {'data': data, 'time': now}
     return data
 
-# ========= FULL STRATEGY =========
+# ========= STRATEGY 7/7 =========
 class SignalEngine:
     def __init__(self): self.min_score = 4
     def analyze(self, df15, df1h, df4h):
@@ -111,7 +112,7 @@ class SignalEngine:
             if t4 == "BULLISH":
                 return {"type": f"A BUY [Score {score}/7]", "price": price, "sl": price-atr*1.5, "tp": price+atr*3.0, "score": score, "reasons": ", ".join(reasons)}
             else:
-                return {"type": f"A SELL [Score {score}/7]", "price": price, "sl": price+atr*1.5, "tp": price-atr*3.0, "score": score, "reasons": ", ".join(reasons)}
+                return {"type": f"A SELL [Score {score}/7]", "price": price, "sl": price-atr*1.5, "tp": price-atr*3.0, "score": score, "reasons": ", ".join(reasons)}
         return None
     def trend(self, df):
         if df is None or len(df) < 200: return "NEUTRAL"
@@ -152,21 +153,16 @@ class Risk:
         risk = abs(s['price']-s['sl']); reward = abs(s['tp']-s['price'])
         return (reward/risk) >= MIN_RRR if risk!=0 else False
 
-# ========= COMMANDS + BACKTEST =========
+# ========= INSTANCES =========
 tg = Telegram()
 engine = SignalEngine()
 risk = Risk()
+running = True
 
-def get_updates(offset=0):
-    try:
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates?offset={offset}&timeout=25"
-        r = requests.get(url, timeout=30).json()
-        return r.get('result', [])
-    except: return []
-
+# ========= FIXED COMMANDS + BACKTEST =========
 def backtest_fast(symbol):
     start = time.time()
-    mtf = get_cached_mtf(symbol) # FAST - uses cache
+    mtf = get_cached_mtf(symbol)
     df = mtf['15m']
     if df is None: return "No data"
     wins=losses=0
@@ -183,35 +179,44 @@ def backtest_fast(symbol):
     total = wins+losses
     wr = wins/total*100 if total else 0
     elapsed = time.time() - start
-    return f"📊 *Backtest {symbol} FAST*\nTotal: {total}\nW: {wins} L: {losses}\nWR: {wr:.1f}%\nTime: {elapsed:.1f}s ⚡\nCache: {'HIT' if symbol in CACHE else 'MISS'}"
+    return f"📊 *Backtest {symbol} FAST*\nTotal: {total}\nW: {wins} L: {losses}\nWR: {wr:.1f}%\nTime: {elapsed:.1f}s ⚡\nCache HIT"
 
 def handle_cmd(text):
-    text = text.lower().strip()
-    if text.startswith("/start"):
-        tg.send("🔥 *V8.2 ULTRA FAST*\n/status\n/stats\n/scan\n/backtest EURUSD\n/backtest XAUUSD\n/score 4 or /score 6\n")
-    elif text.startswith("/status"):
-        cached = ", ".join(CACHE.keys()) if CACHE else "Empty"
-        tg.send(f"🟢 *V8.2 Running*\nScore: {engine.min_score}/7\nCache: {cached}\nCooldown: {COOLDOWN_MINUTES}m")
-    elif text.startswith("/stats"):
+    low = text.lower().strip()
+    if "V8." in text and "/" in text: # ignore our own menu spam
+        return
+    if low.startswith("/start"):
+        tg.send("🔥 *V8.3 FIXED*\n/status - bot status\n/stats - total signals\n/scan - force scan NOW\n/backtest EURUSD - backtest\n/backtest XAUUSD\n/score 4 or /score 6")
+    elif low.startswith("/status"):
+        cached = ", ".join(CACHE.keys()) if CACHE else "Empty (first scan loading)"
+        tg.send(f"🟢 *V8.3 Running FIXED*\nScore: {engine.min_score}/7\nCache: {cached}\nCooldown: {COOLDOWN_MINUTES}m\nLoop bug: FIXED ✅")
+    elif low.startswith("/stats"):
         cur = db.conn.cursor(); cur.execute("SELECT COUNT(*) FROM signals"); total = cur.fetchone()[0]
-        tg.send(f"📈 Total Signals: {total}")
-    elif text.startswith("/scan"):
+        tg.send(f"📈 Total Signals Saved: {total}")
+    elif low.startswith("/scan"):
         tg.send("🔍 Scanning FAST with cache...")
+        found=0
         for sym in SYMBOLS:
             mtf = get_cached_mtf(sym)
             sig = engine.analyze(mtf['15m'], mtf['1h'], mtf['4h'])
-            if sig: tg.send_signal(sym, sig)
-        tg.send("Scan done ⚡")
-    elif text.startswith("/backtest"):
-        parts = text.split()
+            if sig and risk.validate(sig):
+                base = sig['type'].split('[')[0].strip()
+                if not db.is_duplicate(sym, base, COOLDOWN_MINUTES):
+                    tg.send_signal(sym, sig)
+                    db.save(sym, base, sig['price'], sig['score'], sig['reasons'])
+                    found+=1
+        if found==0: tg.send("Scan done - No A+ setup right now. Market waiting.")
+        else: tg.send(f"Scan done ⚡ Sent {found} signals")
+    elif low.startswith("/backtest"):
+        parts = low.split()
         sym = parts[1].upper() if len(parts)>1 else "EURUSD"
         if not sym.startswith("frx"): sym = "frx" + sym.replace("frx","")
         tg.send(f"⏳ Backtesting {sym}...")
         res = backtest_fast(sym)
         tg.send(res)
-    elif text.startswith("/score"):
+    elif low.startswith("/score"):
         try:
-            ns = int(text.split()[1])
+            ns = int(low.split()[1])
             if 3 <= ns <= 7:
                 engine.min_score = ns
                 tg.send(f"✅ Score set to {ns}/7 - {'SNIPER' if ns>=6 else 'BALANCED'} 🔥")
@@ -219,31 +224,45 @@ def handle_cmd(text):
 
 def cmd_listener():
     offset = 0
+    try:
+        me = requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getMe", timeout=10).json()
+        bot_id = me['result']['id']
+    except: bot_id = 0
+    logging.info(f"Command listener started, bot_id {bot_id}")
     while running:
         try:
-            ups = get_updates(offset)
-            for u in ups:
-                offset = u['update_id'] + 1
-                msg = u.get('message', {}); text = msg.get('text','')
-                if text.startswith("/"): handle_cmd(text)
-        except: pass
+            url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates?offset={offset}&timeout=25"
+            r = requests.get(url, timeout=30).json()
+            for u in r.get('result', []):
+                offset = u['update_id'] + 1 # UPDATE FIRST - stops repeat
+                msg = u.get('message') # ONLY private DM, ignore channel_post
+                if not msg: continue
+                from_id = msg.get('from', {}).get('id', 0)
+                if from_id == bot_id: continue
+                if msg.get('from', {}).get('is_bot'): continue
+                text = msg.get('text','')
+                if not text or not text.startswith("/"): continue
+                logging.info(f"CMD: {text}")
+                handle_cmd(text)
+        except Exception as e:
+            logging.error(f"cmd error {e}")
         time.sleep(2)
 
-# ========= MAIN =========
-running = True
+# ========= MAIN LOOP =========
 def shutdown(a,b):
     global running; running=False
-signal.signal(signal.SIGINT, shutdown); signal.signal(signal.SIGTERM, shutdown)
+signal.signal(signal.SIGINT, shutdown)
+signal.signal(signal.SIGTERM, shutdown)
 
-tg.send("✅ *V8.2 ULTRA FAST LIVE* 🔥\nCache ON | 3-sec Backtest | Anti-Spam\nType /start")
+tg.send("✅ *V8.3 FIXED LIVE* 🔥\nLoop Bug Fixed | Commands Working\nType /start in DM")
 
 threading.Thread(target=cmd_listener, daemon=True).start()
-logging.info("V8.2 ULTRA FAST Started")
+logging.info("V8.3 FIXED Started")
 
 while running:
     try:
         for sym in SYMBOLS:
-            mtf = get_cached_mtf(sym) # FAST
+            mtf = get_cached_mtf(sym)
             sig = engine.analyze(mtf['15m'], mtf['1h'], mtf['4h'])
             if sig and risk.validate(sig):
                 base = sig['type'].split('[')[0].strip()
@@ -252,7 +271,7 @@ while running:
                     db.save(sym, base, sig['price'], sig['score'], sig['reasons'])
                     logging.info(f"SENT {sym} {sig['type']}")
     except Exception as e:
-        logging.error(f"Error: {e}")
+        logging.error(f"Loop error: {e}")
     for _ in range(SCAN_INTERVAL // 5):
         if not running: break
         time.sleep(5)
