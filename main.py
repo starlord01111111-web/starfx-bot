@@ -25,7 +25,11 @@ RISK_PER_TRADE_PCT = 0.01   # Risk 1% of account balance per trade
 MAX_DAILY_LOSS_PCT = 0.03   # Block new trades if daily drawdown reaches 3%
 MAX_CONCURRENT_TRADES = 2   # Maximum open active trades allowed
 
-exchange = ccxt.binance()
+# Use Kraken or BinanceUS to bypass US geo-restrictions on public data
+exchange = ccxt.kraken({
+    'enableRateLimit': True,
+})
+
 
 # State Tracking Variables
 daily_stats = {"date": None, "losses_today": 0.0, "is_circuit_broken": False}
@@ -442,7 +446,18 @@ def init_db():
     )
     conn.commit()
     conn.close()
-
+    
+# --- TELEGRAM COMMAND HANDLER ---
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    welcome_text = (
+        "🤖 *Multi-Asset Adaptive SMC Engine Online*\n\n"
+        "• **Monitored Assets:** `XAU/USD`, `GBP/USD`, `BTC/USDT`\n"
+        "• **Session Filter:** Active scanning starts at `09:00 EAT`\n"
+        "• **Risk Parameters:** 1% Risk/Trade | 3% Daily Drawdown Limit\n\n"
+        "⚡ *System active and scanning M5/M15/H1/H4 timeframes...*"
+    )
+    await update.message.reply_text(welcome_text, parse_mode="Markdown")
+    
 # --- MAIN ENTRY POINT ---
 import asyncio
 from telegram.ext import Application
@@ -471,4 +486,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
     
