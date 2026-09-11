@@ -14,7 +14,7 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 TELEGRAM_TOKEN =  "8656945768:AAG1avs7PEkGlwJ6VI8cBiOyclOIqmyPjDA"
-CHAT_ID =  "-1004365660319"
+CHAT_ID = "-1004365660319"
 SYMBOLS = ["XAU/USD", "GBP/USD", "BTC/USD"]
 NEWS_CURRENCY = ["USD", "GBP"]
 
@@ -155,15 +155,14 @@ def detect_price_action(df):
         return "BEARISH_ENGULFING"
     return None
 
+# --- V10.3 FIXED SETUP WITH ATR SL ---
 def evaluate_aplus_setup(symbol):
     if not check_circuit_breaker() or len(active_trades) >= MAX_CONCURRENT_TRADES:
         return None
-    pre_news = fetch_news_window()
     h4 = fetch_data(symbol, '4h')
     h1 = fetch_data(symbol, '1h')
-    m15 = fetch_data(symbol, '15m')
     m5 = fetch_data(symbol, '5m')
-    if h4 is None or h1 is None or m15 is None or m5 is None:
+    if h4 is None or h1 is None or m5 is None:
         return None
     h4_bias = analyze_structure(h4)
     h1_bias = analyze_structure(h1)
@@ -173,34 +172,41 @@ def evaluate_aplus_setup(symbol):
     if not m5_pa:
         return None
     price = m5['close'].iloc[-1]
+    # ATR for dynamic SL
+    atr = (m5['high'] - m5['low']).rolling(14).mean().iloc[-1]
+    if pd.isna(atr) or atr == 0:
+        atr = price * 0.001
+
     if h4_bias == "BULLISH" and "BULLISH" in m5_pa:
-        sl = m5['low'].iloc[-3:].min()*0.9995
+        sl = m5['low'].iloc[-3:].min() - atr*1.2
         if "XAU" in symbol:
-            sl = m5['low'].iloc[-3:].min() - 2.0
+            sl = m5['low'].iloc[-3:].min() - max(2.0, atr*1.5)
+        if "BTC" in symbol:
+            sl = m5['low'].iloc[-3:].min() - max(50.0, atr*1.5)
         risk = price - sl
         if risk <=0:
             return None
-        return {"symbol": symbol, "bias": "BUY", "price": price, "sl": sl, "tp1": price + risk*1.5, "tp2": price + risk*3.0, "position_units": calculate_position_size(ACCOUNT_BALANCE, RISK_PER_TRADE_PCT, price, sl), "df": m5, "tp1_hit": False, "pre_news": bool(pre_news)}
+        return {"symbol": symbol, "bias": "BUY", "price": price, "sl": sl, "tp1": price + risk*1.5, "tp2": price + risk*3.0, "position_units": calculate_position_size(ACCOUNT_BALANCE, RISK_PER_TRADE_PCT, price, sl), "df": m5, "tp1_hit": False, "pre_news": False}
     if h4_bias == "BEARISH" and "BEARISH" in m5_pa:
-        sl = m5['high'].iloc[-3:].max()*1.0005
+        sl = m5['high'].iloc[-3:].max() + atr*1.2
         if "XAU" in symbol:
-            sl = m5['high'].iloc[-3:].max() + 2.0
+            sl = m5['high'].iloc[-3:].max() + max(2.0, atr*1.5)
+        if "BTC" in symbol:
+            sl = m5['high'].iloc[-3:].max() + max(50.0, atr*1.5)
         risk = sl - price
         if risk <=0:
             return None
-        return {"symbol": symbol, "bias": "SELL", "price": price, "sl": sl, "tp1": price - risk*1.5, "tp2": price - risk*3.0, "position_units": calculate_position_size(ACCOUNT_BALANCE, RISK_PER_TRADE_PCT, price, sl), "df": m5, "tp1_hit": False, "pre_news": bool(pre_news)}
+        return {"symbol": symbol, "bias": "SELL", "price": price, "sl": sl, "tp1": price - risk*1.5, "tp2": price - risk*3.0, "position_units": calculate_position_size(ACCOUNT_BALANCE, RISK_PER_TRADE_PCT, price, sl), "df": m5, "tp1_hit": False, "pre_news": False}
     return None
 
-# --- NEW TP TRACKER ---
 async def track_positions(app: Application):
-    print("TP Tracker LIVE - Checking every 10 sec")
+    print("TP Tracker LIVE")
     while True:
         try:
             for trade in list(active_trades):
                 current_price = fetch_current_price(trade['symbol'])
                 if current_price is None:
                     continue
-
                 sym = trade['symbol']
                 ep = format_price(sym, trade['price'])
                 slp = format_price(sym, trade['sl'])
@@ -208,18 +214,15 @@ async def track_positions(app: Application):
                 tp2p = format_price(sym, trade['tp2'])
                 curr_p = format_price(sym, current_price)
 
-                # BUY LOGIC
                 if trade['bias'] == "BUY":
-                    # TP1
                     if not trade['tp1_hit'] and current_price >= trade['tp1']:
                         trade['tp1_hit'] = True
                         daily_stats['tp1_hits'] += 1
                         msg = f"✅ TP1 HIT (1:1.5) {sym}\nEntry {ep} -> Now {curr_p}\nTP1 {tp1p} Secured\nSL moved to breakeven"
                         try:
                             await app.bot.send_message(chat_id=CHAT_ID, text=msg)
-                        except Exception as e:
-                            print(f"TP1 send error {e}")
-                    # TP2
+                        except:
+                            pass
                     elif current_price >= trade['tp2']:
                         daily_stats['wins'] += 1
                         msg = f"🎯🎯 TP2 HIT FULL (1:3) {sym}\nEntry {ep} -> TP2 {tp2p}\nTrade Closed +3R"
@@ -228,11 +231,9 @@ async def track_positions(app: Application):
                         except:
                             pass
                         active_trades.remove(trade)
-                    # SL
                     elif current_price <= trade['sl']:
-                        # If TP1 was hit, it's breakeven, not loss
                         if trade['tp1_hit']:
-                            msg = f"🔄 BE Closed {sym} @ Breakeven\nTP1 was hit earlier. No loss."
+                            msg = f"🔄 BE Closed {sym} @ Breakeven"
                         else:
                             daily_stats['losses'] += 1
                             daily_stats['losses_today'] += ACCOUNT_BALANCE * RISK_PER_TRADE_PCT
@@ -242,8 +243,6 @@ async def track_positions(app: Application):
                         except:
                             pass
                         active_trades.remove(trade)
-
-                # SELL LOGIC
                 elif trade['bias'] == "SELL":
                     if not trade['tp1_hit'] and current_price <= trade['tp1']:
                         trade['tp1_hit'] = True
@@ -251,8 +250,8 @@ async def track_positions(app: Application):
                         msg = f"✅ TP1 HIT (1:1.5) {sym}\nEntry {ep} -> Now {curr_p}\nTP1 {tp1p} Secured\nSL moved to breakeven"
                         try:
                             await app.bot.send_message(chat_id=CHAT_ID, text=msg)
-                        except Exception as e:
-                            print(f"TP1 send error {e}")
+                        except:
+                            pass
                     elif current_price <= trade['tp2']:
                         daily_stats['wins'] += 1
                         msg = f"🎯🎯 TP2 HIT FULL (1:3) {sym}\nEntry {ep} -> TP2 {tp2p}\nTrade Closed +3R"
@@ -263,7 +262,7 @@ async def track_positions(app: Application):
                         active_trades.remove(trade)
                     elif current_price >= trade['sl']:
                         if trade['tp1_hit']:
-                            msg = f"🔄 BE Closed {sym} @ Breakeven\nTP1 was hit earlier. No loss."
+                            msg = f"🔄 BE Closed {sym} @ Breakeven"
                         else:
                             daily_stats['losses'] += 1
                             daily_stats['losses_today'] += ACCOUNT_BALANCE * RISK_PER_TRADE_PCT
@@ -273,14 +272,13 @@ async def track_positions(app: Application):
                         except:
                             pass
                         active_trades.remove(trade)
-
             await asyncio.sleep(10)
         except Exception as e:
             print(f"Tracker error {e}")
             await asyncio.sleep(10)
 
 async def market_scanner(app: Application):
-    print("Scanner LIVE")
+    print("Scanner LIVE V10.3 ATR")
     last_m5 = {}
     while True:
         try:
@@ -303,7 +301,8 @@ async def market_scanner(app: Application):
                     slp = format_price(symbol, setup['sl'])
                     tp1p = format_price(symbol, setup['tp1'])
                     tp2p = format_price(symbol, setup['tp2'])
-                    caption = f"🎯 {setup['bias']} {symbol}\nEntry {ep}\nSL {slp}\nTP1 {tp1p} (1:1.5)\nTP2 {tp2p} (1:3)\nSize {setup['position_units']} units"
+                    lots = setup['position_units'] / 100000
+                    caption = f"🎯 {setup['bias']} {symbol}\nEntry {ep}\nSL {slp}\nTP1 {tp1p} (1:1.5)\nTP2 {tp2p} (1:3)\nSize {lots:.2f} Lots"
                     try:
                         with open(chart, "rb") as photo:
                             await app.bot.send_photo(chat_id=CHAT_ID, photo=photo, caption=caption)
@@ -328,7 +327,9 @@ async def schedule_daily_report(app: Application):
                     df = fetch_data(sym, '1d', 5)
                     if df is not None:
                         report+= f"{sym}: {format_price(sym, df['close'].iloc[-1])}\n"
-                report+= f"\nWins: {daily_stats['wins']} | Losses: {daily_stats['losses']} | TP1: {daily_stats['tp1_hits']}\nDrawdown: ${daily_stats['losses_today']:.2f}\nActive: {len(active_trades)}"
+                total = daily_stats['wins'] + daily_stats['losses']
+                wr = daily_stats['wins']/total*100 if total>0 else 0
+                report+= f"\nWR {wr:.1f}% Wins {daily_stats['wins']} Losses {daily_stats['losses']} TP1 {daily_stats['tp1_hits']}\nActive {len(active_trades)}"
                 try:
                     await app.bot.send_message(chat_id=CHAT_ID, text=report)
                     sent_today = now_utc.date()
@@ -344,10 +345,10 @@ def init_db():
     conn.close()
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("StarFx V10.2 Live + TP Tracker\n/signal /price /news /performance\nReport 23:00 EAT")
+    await update.message.reply_text("StarFx V10.3 ATR Live\n/signal /price /news /performance")
 
 async def signal_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Scanning A+...")
+    await update.message.reply_text("Scanning A+ ATR...")
     found=0
     for sym in SYMBOLS:
         setup = evaluate_aplus_setup(sym)
@@ -355,9 +356,8 @@ async def signal_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             found+=1
             chart = generate_tradingview_chart(setup['df'], sym, setup)
             ep = format_price(sym, setup['price'])
-            caption = f"{setup['bias']} {sym} Entry {ep}"
             with open(chart, "rb") as photo:
-                await context.bot.send_photo(chat_id=update.effective_chat.id, photo=photo, caption=caption)
+                await context.bot.send_photo(chat_id=update.effective_chat.id, photo=photo, caption=f"{setup['bias']} {sym} Entry {ep}")
             if os.path.exists(chart):
                 os.remove(chart)
     if found==0:
@@ -372,7 +372,8 @@ async def price_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg)
 
 async def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("No high impact news next 2h." if not fetch_news_window() else "News coming - check FF")
+    ev = fetch_news_window()
+    await update.message.reply_text("No high impact news next 2h." if not ev else f"News soon: {ev[0].get('title')}")
 
 async def performance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     total = daily_stats['wins'] + daily_stats['losses']
@@ -392,7 +393,7 @@ async def main():
     asyncio.create_task(market_scanner(app))
     asyncio.create_task(track_positions(app))
     asyncio.create_task(schedule_daily_report(app))
-    print("V10.2 + TP Tracker Online")
+    print("V10.3 ATR Online")
     async with app:
         await app.initialize()
         await app.start()
