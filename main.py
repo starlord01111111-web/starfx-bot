@@ -405,6 +405,26 @@ async def market_scanner(app: Application):
             print(f"Scanner Exception: {e}")
             await asyncio.sleep(10)
 
+# --- DATABASE INITIALIZATION ---
+def init_db():
+    """Initializes trade performance database for adaptive learning."""
+    conn = sqlite3.connect("trading_data.db")
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS trades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol TEXT,
+            bias TEXT,
+            h4_h1_aligned INTEGER,
+            m15_sweep INTEGER,
+            m5_pa INTEGER,
+            result INTEGER
+        )
+    """
+    )
+    conn.commit()
+    conn.close()
 
 # --- MAIN ENTRY POINT ---
 import asyncio
