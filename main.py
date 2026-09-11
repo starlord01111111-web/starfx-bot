@@ -2,8 +2,7 @@ import asyncio
 from datetime import datetime, timezone, timedelta
 import os
 import threading
-from http.server import
-HTTPServer, BaseHTTPRequestHandler
+from http.server import HTTPServer, BaseHTTPRequestHandler
 import sqlite3
 import ccxt
 import matplotlib.pyplot as plt
@@ -32,6 +31,19 @@ exchange = ccxt.binance()
 daily_stats = {"date": None, "losses_today": 0.0, "is_circuit_broken": False}
 active_trades = []
 
+# --- DUMMY HTTP SERVER FOR RENDER PORT CHECK ---
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+def start_dummy_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    server.serve_forever()
+
+threading.Thread(target=start_dummy_server, daemon=True).start()
 
 # --- RISK & POSITION SIZING ENGINE ---
 def calculate_position_size(account_balance, risk_pct, entry, stop_loss):
