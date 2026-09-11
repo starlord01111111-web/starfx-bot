@@ -12,7 +12,7 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 # --- CONFIGURATION ---
-TELEGRAM_TOKEN = "8656945768:AAE4-rNQ6EDm7wPNorQctAXWfcSYkCv1b2U"
+TELEGRAM_TOKEN = "8656945768:AAFOQ03HPbaUvegYP2Or8xkSWY1S4Da7lVo"
 CHAT_ID = "-1004365660319"
 SYMBOLS = ["XAU/USD", "GBP/USD", "BTC/USDT"]
 NEWS_CURRENCY = ["USD", "GBP"]
@@ -407,16 +407,31 @@ async def market_scanner(app: Application):
 
 
 # --- MAIN ENTRY POINT ---
-def main():
+import asyncio
+from telegram.ext import Application
+
+
+async def main():
+    init_db()
+
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
-    loop = asyncio.get_event_loop()
-    loop.create_task(market_scanner(app))
-    loop.create_task(track_positions(app))
-    loop.create_task(schedule_daily_report(app))
+    # Must use asyncio.create_task for async functions in modern asyncio
+    asyncio.create_task(market_scanner(app))
+    asyncio.create_task(track_positions(app))
+    asyncio.create_task(schedule_daily_report(app))
 
     print("Adaptive Bot Application Online...")
-    app.run_polling(drop_pending_updates=True)
+
+    # Initialize and run polling within the async context manager
+    async with app:
+        await app.initialize()
+        await app.start()
+        await app.updater.start_polling(drop_pending_updates=True)
+        # Keep the process alive indefinitely
+        await asyncio.Event().wait()
+
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
+    
