@@ -14,7 +14,7 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 # --- CONFIGURATION ---
-TELEGRAM_TOKEN = "8656945768:AAFOQ03HPbaUvegYP2Or8xkSWY1S4Da7lVo"
+TELEGRAM_TOKEN = "8656945768:AAG1avs7PEkGlwJ6VI8cBiOyclOIqmyPjDA"
 CHAT_ID = "-1004365660319"
 SYMBOLS = ["XAU/USD", "GBP/USD", "BTC/USDT"]
 NEWS_CURRENCY = ["USD", "GBP"]
