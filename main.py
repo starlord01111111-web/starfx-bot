@@ -1,6 +1,9 @@
 import asyncio
 from datetime import datetime, timezone, timedelta
 import os
+import threading
+from http.server import
+HTTPServer, BaseHTTPRequestHandler
 import sqlite3
 import ccxt
 import matplotlib.pyplot as plt
