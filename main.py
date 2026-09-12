@@ -6,6 +6,7 @@ import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import sqlite3
 import ccxt
+import json
 import matplotlib.pyplot as plt
 import mplfinance as mpf
 import pandas as pd
@@ -15,10 +16,11 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 
 TELEGRAM_TOKEN =  "8656945768:AAG1avs7PEkGlwJ6VI8cBiOyclOIqmyPjDA"
 CHAT_ID = "-1004365660319"
-SYMBOLS = ["XAU/USD", "GBP/USD", "BTC/USD"]
+# V10.6 - Added Volatility 75 Index (R_75 Deriv)
+SYMBOLS = ["XAU/USD", "GBP/USD", "R_75"]
 NEWS_CURRENCY = ["USD", "GBP"]
 
-ACCOUNT_BALANCE = 10000.00
+ACCOUNT_BALANCE = 100.00
 RISK_PER_TRADE_PCT = 0.01
 MAX_DAILY_LOSS_PCT = 0.03
 MAX_CONCURRENT_TRADES = 3
@@ -47,7 +49,7 @@ threading.Thread(target=start_dummy_server, daemon=True).start()
 def format_price(symbol, price):
     if price is None:
         return "N/A"
-    if "XAU" in symbol or "BTC" in symbol:
+    if "XAU" in symbol or "R_75" in symbol or "V75" in symbol or "Volatility" in symbol:
         return f"{price:.2f}"
     return f"{price:.5f}"
 
@@ -68,7 +70,35 @@ def check_circuit_breaker():
         return False
     return True
 
+# --- DERIV V75 FETCH ---
+def fetch_deriv_data(symbol, timeframe, limit=100):
+    try:
+        import websocket
+        gran_map = {'1m': 60, '5m': 300, '15m': 900, '1h': 3600, '4h': 14400, '1d': 86400}
+        gran = gran_map.get(timeframe, 300)
+        ws = websocket.create_connection("wss://ws.derivws.com/websockets/v3?app_id=1089", timeout=10)
+        req = {"ticks_history": "R_75", "adjust_start_time": 1, "count": limit, "end": "latest", "granularity": gran, "style": "candles"}
+        ws.send(json.dumps(req))
+        res = json.loads(ws.recv())
+        ws.close()
+        if "candles" not in res:
+            print(f"Deriv error: {res}")
+            return None
+        candles = res["candles"]
+        df = pd.DataFrame(candles)
+        df['timestamp'] = pd.to_datetime(df['epoch'], unit='s', utc=True)
+        df.set_index('timestamp', inplace=True)
+        df.rename(columns={'open': 'open', 'high': 'high', 'low': 'low', 'close': 'close'}, inplace=True)
+        df = df[['open', 'high', 'low', 'close']].astype(float)
+        df['volume'] = 1000
+        return df
+    except Exception as e:
+        print(f"Deriv fetch error {e}")
+        return None
+
 def fetch_data(symbol, timeframe, limit=100):
+    if "R_75" in symbol or "V75" in symbol or "Volatility" in symbol:
+        return fetch_deriv_data(symbol, timeframe, limit)
     try:
         bars = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
         df = pd.DataFrame(bars, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -80,25 +110,38 @@ def fetch_data(symbol, timeframe, limit=100):
         return None
 
 def fetch_current_price(symbol):
+    if "R_75" in symbol or "V75" in symbol:
+        try:
+            import websocket
+            ws = websocket.create_connection("wss://ws.derivws.com/websockets/v3?app_id=1089", timeout=5)
+            ws.send(json.dumps({"ticks": "R_75"}))
+            res = json.loads(ws.recv())
+            ws.close()
+            if "tick" in res:
+                return float(res["tick"]["quote"])
+        except:
+            pass
+        df = fetch_deriv_data(symbol, '1m', 2)
+        if df is not None:
+            return df['close'].iloc[-1]
+        return None
     try:
         ticker = exchange.fetch_ticker(symbol)
         return ticker['last']
     except:
-        try:
-            df = fetch_data(symbol, '1m', 2)
-            if df is not None:
-                return df['close'].iloc[-1]
-        except:
-            pass
+        df = fetch_data(symbol, '1m', 2)
+        if df is not None:
+            return df['close'].iloc[-1]
     return None
 
 def generate_tradingview_chart(df, symbol, setup, filename="chart.png"):
     plot_df = df.iloc[-60:].copy()
     mc = mpf.make_marketcolors(up='#26a69a', down='#ef5350', edge='inherit', wick='inherit', volume='in')
     style = mpf.make_mpf_style(marketcolors=mc, gridstyle=":", gridcolor="#2a2e39", facecolor="#131722")
+    display_sym = "Volatility 75 Index" if "R_75" in symbol else symbol
     hlines = [setup['price'], setup['tp1'], setup['tp2'], setup['sl']]
     colors = ['#2962ff', '#00e676', '#00c853', '#ff1744']
-    fig, _ = mpf.plot(plot_df, type='candle', style=style, title=f"\n{symbol} - {setup['bias']}", hlines=dict(hlines=hlines, colors=colors, linestyle='--', linewidths=1.2), savefig=filename, returnfig=True, figratio=(16,9), figscale=1.2)
+    fig, _ = mpf.plot(plot_df, type='candle', style=style, title=f"\n{display_sym} - {setup['bias']}", hlines=dict(hlines=hlines, colors=colors, linestyle='--', linewidths=1.2), savefig=filename, returnfig=True, figratio=(16,9), figscale=1.2)
     plt.close(fig)
     return filename
 
@@ -155,7 +198,6 @@ def detect_price_action(df):
         return "BEARISH_ENGULFING"
     return None
 
-# --- V10.3 FIXED SETUP WITH ATR SL ---
 def evaluate_aplus_setup(symbol):
     if not check_circuit_breaker() or len(active_trades) >= MAX_CONCURRENT_TRADES:
         return None
@@ -172,35 +214,47 @@ def evaluate_aplus_setup(symbol):
     if not m5_pa:
         return None
     price = m5['close'].iloc[-1]
-    # ATR for dynamic SL
     atr = (m5['high'] - m5['low']).rolling(14).mean().iloc[-1]
     if pd.isna(atr) or atr == 0:
         atr = price * 0.001
 
+    # Wider SL for V75 - very volatile
+    if "R_75" in symbol or "V75" in symbol:
+        atr_mult = 2.0
+        min_sl = price * 0.002 # 0.2% min SL for V75
+    elif "XAU" in symbol:
+        atr_mult = 1.5
+        min_sl = 2.0
+    else:
+        atr_mult = 1.2
+        min_sl = atr
+
     if h4_bias == "BULLISH" and "BULLISH" in m5_pa:
-        sl = m5['low'].iloc[-3:].min() - atr*1.2
-        if "XAU" in symbol:
+        if "R_75" in symbol or "V75" in symbol:
+            sl = m5['low'].iloc[-3:].min() - max(min_sl, atr*atr_mult)
+        elif "XAU" in symbol:
             sl = m5['low'].iloc[-3:].min() - max(2.0, atr*1.5)
-        if "BTC" in symbol:
-            sl = m5['low'].iloc[-3:].min() - max(50.0, atr*1.5)
+        else:
+            sl = m5['low'].iloc[-3:].min() - atr*1.2
         risk = price - sl
         if risk <=0:
             return None
-        return {"symbol": symbol, "bias": "BUY", "price": price, "sl": sl, "tp1": price + risk*1.5, "tp2": price + risk*3.0, "position_units": calculate_position_size(ACCOUNT_BALANCE, RISK_PER_TRADE_PCT, price, sl), "df": m5, "tp1_hit": False, "pre_news": False}
+        return {"symbol": symbol, "bias": "BUY", "price": price, "sl": sl, "tp1": price + risk*1.5, "tp2": price + risk*3.0, "position_units": calculate_position_size(ACCOUNT_BALANCE, RISK_PER_TRADE_PCT, price, sl), "df": m5, "tp1_hit": False}
     if h4_bias == "BEARISH" and "BEARISH" in m5_pa:
-        sl = m5['high'].iloc[-3:].max() + atr*1.2
-        if "XAU" in symbol:
+        if "R_75" in symbol or "V75" in symbol:
+            sl = m5['high'].iloc[-3:].max() + max(min_sl, atr*atr_mult)
+        elif "XAU" in symbol:
             sl = m5['high'].iloc[-3:].max() + max(2.0, atr*1.5)
-        if "BTC" in symbol:
-            sl = m5['high'].iloc[-3:].max() + max(50.0, atr*1.5)
+        else:
+            sl = m5['high'].iloc[-3:].max() + atr*1.2
         risk = sl - price
         if risk <=0:
             return None
-        return {"symbol": symbol, "bias": "SELL", "price": price, "sl": sl, "tp1": price - risk*1.5, "tp2": price - risk*3.0, "position_units": calculate_position_size(ACCOUNT_BALANCE, RISK_PER_TRADE_PCT, price, sl), "df": m5, "tp1_hit": False, "pre_news": False}
+        return {"symbol": symbol, "bias": "SELL", "price": price, "sl": sl, "tp1": price - risk*1.5, "tp2": price - risk*3.0, "position_units": calculate_position_size(ACCOUNT_BALANCE, RISK_PER_TRADE_PCT, price, sl), "df": m5, "tp1_hit": False}
     return None
 
 async def track_positions(app: Application):
-    print("TP Tracker LIVE")
+    print("TP Tracker LIVE V10.6")
     while True:
         try:
             for trade in list(active_trades):
@@ -208,6 +262,7 @@ async def track_positions(app: Application):
                 if current_price is None:
                     continue
                 sym = trade['symbol']
+                display_sym = "Volatility 75 Index" if "R_75" in sym else sym
                 ep = format_price(sym, trade['price'])
                 slp = format_price(sym, trade['sl'])
                 tp1p = format_price(sym, trade['tp1'])
@@ -218,59 +273,47 @@ async def track_positions(app: Application):
                     if not trade['tp1_hit'] and current_price >= trade['tp1']:
                         trade['tp1_hit'] = True
                         daily_stats['tp1_hits'] += 1
-                        msg = f"✅ TP1 HIT (1:1.5) {sym}\nEntry {ep} -> Now {curr_p}\nTP1 {tp1p} Secured\nSL moved to breakeven"
-                        try:
-                            await app.bot.send_message(chat_id=CHAT_ID, text=msg)
-                        except:
-                            pass
+                        msg = f"✅ TP1 HIT (1:1.5) {display_sym}\nEntry {ep} -> Now {curr_p}\nTP1 {tp1p} Secured\nSL moved to breakeven"
+                        try: await app.bot.send_message(chat_id=CHAT_ID, text=msg)
+                        except: pass
                     elif current_price >= trade['tp2']:
                         daily_stats['wins'] += 1
-                        msg = f"🎯🎯 TP2 HIT FULL (1:3) {sym}\nEntry {ep} -> TP2 {tp2p}\nTrade Closed +3R"
-                        try:
-                            await app.bot.send_message(chat_id=CHAT_ID, text=msg)
-                        except:
-                            pass
+                        msg = f"🎯🎯 TP2 HIT FULL (1:3) {display_sym}\nEntry {ep} -> TP2 {tp2p}\nTrade Closed +3R"
+                        try: await app.bot.send_message(chat_id=CHAT_ID, text=msg)
+                        except: pass
                         active_trades.remove(trade)
                     elif current_price <= trade['sl']:
                         if trade['tp1_hit']:
-                            msg = f"🔄 BE Closed {sym} @ Breakeven"
+                            msg = f"🔄 BE Closed {display_sym} @ Breakeven\nTP1 was hit earlier. No loss."
                         else:
                             daily_stats['losses'] += 1
                             daily_stats['losses_today'] += ACCOUNT_BALANCE * RISK_PER_TRADE_PCT
-                            msg = f"🛑 SL HIT {sym}\nEntry {ep} SL {slp} Now {curr_p}\n-1% logged"
-                        try:
-                            await app.bot.send_message(chat_id=CHAT_ID, text=msg)
-                        except:
-                            pass
+                            msg = f"🔴 SL HIT {display_sym}\nEntry {ep} SL {slp}\nNow {curr_p}\n-1% logged"
+                        try: await app.bot.send_message(chat_id=CHAT_ID, text=msg)
+                        except: pass
                         active_trades.remove(trade)
                 elif trade['bias'] == "SELL":
                     if not trade['tp1_hit'] and current_price <= trade['tp1']:
                         trade['tp1_hit'] = True
                         daily_stats['tp1_hits'] += 1
-                        msg = f"✅ TP1 HIT (1:1.5) {sym}\nEntry {ep} -> Now {curr_p}\nTP1 {tp1p} Secured\nSL moved to breakeven"
-                        try:
-                            await app.bot.send_message(chat_id=CHAT_ID, text=msg)
-                        except:
-                            pass
+                        msg = f"✅ TP1 HIT (1:1.5) {display_sym}\nEntry {ep} -> Now {curr_p}\nTP1 {tp1p} Secured\nSL moved to breakeven"
+                        try: await app.bot.send_message(chat_id=CHAT_ID, text=msg)
+                        except: pass
                     elif current_price <= trade['tp2']:
                         daily_stats['wins'] += 1
-                        msg = f"🎯🎯 TP2 HIT FULL (1:3) {sym}\nEntry {ep} -> TP2 {tp2p}\nTrade Closed +3R"
-                        try:
-                            await app.bot.send_message(chat_id=CHAT_ID, text=msg)
-                        except:
-                            pass
+                        msg = f"🎯🎯 TP2 HIT FULL (1:3) {display_sym}\nEntry {ep} -> TP2 {tp2p}\nTrade Closed +3R"
+                        try: await app.bot.send_message(chat_id=CHAT_ID, text=msg)
+                        except: pass
                         active_trades.remove(trade)
                     elif current_price >= trade['sl']:
                         if trade['tp1_hit']:
-                            msg = f"🔄 BE Closed {sym} @ Breakeven"
+                            msg = f"🔄 BE Closed {display_sym} @ Breakeven\nTP1 was hit earlier. No loss."
                         else:
                             daily_stats['losses'] += 1
                             daily_stats['losses_today'] += ACCOUNT_BALANCE * RISK_PER_TRADE_PCT
-                            msg = f"🛑 SL HIT {sym}\nEntry {ep} SL {slp} Now {curr_p}\n-1% logged"
-                        try:
-                            await app.bot.send_message(chat_id=CHAT_ID, text=msg)
-                        except:
-                            pass
+                            msg = f"🔴 SL HIT {display_sym}\nEntry {ep} SL {slp}\nNow {curr_p}\n-1% logged"
+                        try: await app.bot.send_message(chat_id=CHAT_ID, text=msg)
+                        except: pass
                         active_trades.remove(trade)
             await asyncio.sleep(10)
         except Exception as e:
@@ -278,7 +321,7 @@ async def track_positions(app: Application):
             await asyncio.sleep(10)
 
 async def market_scanner(app: Application):
-    print("Scanner LIVE V10.3 ATR")
+    print("Scanner LIVE V10.6 With V75")
     last_m5 = {}
     while True:
         try:
@@ -294,20 +337,22 @@ async def market_scanner(app: Application):
                 last_m5[symbol]=cur
                 setup = evaluate_aplus_setup(symbol)
                 if setup:
-                    active_trades.append(setup)
-                    last_signal_time[symbol] = time.time()
                     chart = generate_tradingview_chart(setup['df'], symbol, setup)
                     ep = format_price(symbol, setup['price'])
                     slp = format_price(symbol, setup['sl'])
                     tp1p = format_price(symbol, setup['tp1'])
                     tp2p = format_price(symbol, setup['tp2'])
                     lots = setup['position_units'] / 100000
-                    caption = f"🎯 {setup['bias']} {symbol}\nEntry {ep}\nSL {slp}\nTP1 {tp1p} (1:1.5)\nTP2 {tp2p} (1:3)\nSize {lots:.2f} Lots"
+                    display_sym = "Volatility 75 Index" if "R_75" in symbol else symbol
+                    caption = f"🎯 {setup['bias']} {display_sym}\nEntry {ep}\nSL {slp}\nTP1 {tp1p} (1:1.5)\nTP2 {tp2p} (1:3)\nSize {lots:.2f} Lots"
                     try:
                         with open(chart, "rb") as photo:
                             await app.bot.send_photo(chat_id=CHAT_ID, photo=photo, caption=caption)
+                        active_trades.append(setup)
+                        last_signal_time[symbol] = time.time()
+                        print(f"Sent + Tracked {symbol}")
                     except Exception as e:
-                        print(f"Send error: {e}")
+                        print(f"Ghost prevented {symbol}: {e}")
                     if os.path.exists(chart):
                         os.remove(chart)
                     await asyncio.sleep(3)
@@ -319,24 +364,28 @@ async def market_scanner(app: Application):
 async def schedule_daily_report(app: Application):
     sent_today = None
     while True:
-        now_utc = datetime.now(timezone.utc)
-        if now_utc.hour == 20 and now_utc.minute == 0:
-            if sent_today!= now_utc.date():
-                report = f"📊 DAILY REPORT 23:00 EAT {now_utc.date()}\n\n"
-                for sym in SYMBOLS:
-                    df = fetch_data(sym, '1d', 5)
-                    if df is not None:
-                        report+= f"{sym}: {format_price(sym, df['close'].iloc[-1])}\n"
-                total = daily_stats['wins'] + daily_stats['losses']
-                wr = daily_stats['wins']/total*100 if total>0 else 0
-                report+= f"\nWR {wr:.1f}% Wins {daily_stats['wins']} Losses {daily_stats['losses']} TP1 {daily_stats['tp1_hits']}\nActive {len(active_trades)}"
-                try:
-                    await app.bot.send_message(chat_id=CHAT_ID, text=report)
-                    sent_today = now_utc.date()
-                except:
-                    pass
+        try:
+            now_utc = datetime.now(timezone.utc)
+            if now_utc.hour == 20 and now_utc.minute <= 10:
+                if sent_today!= now_utc.date():
+                    report = f"📊 DAILY REPORT 23:00 EAT {now_utc.date()}\n\n"
+                    for sym in SYMBOLS:
+                        df = fetch_data(sym, '1d', 5)
+                        if df is not None:
+                            dname = "Volatility 75 Index" if "R_75" in sym else sym
+                            report+= f"{dname}: {format_price(sym, df['close'].iloc[-1])}\n"
+                    total = daily_stats['wins'] + daily_stats['losses']
+                    wr = daily_stats['wins']/total*100 if total>0 else 0
+                    report+= f"\nWR {wr:.1f}% Wins {daily_stats['wins']} Losses {daily_stats['losses']} TP1 {daily_stats['tp1_hits']}\nActive {len(active_trades)}"
+                    try:
+                        await app.bot.send_message(chat_id=CHAT_ID, text=report)
+                        sent_today = now_utc.date()
+                    except:
+                        pass
             await asyncio.sleep(60)
-        await asyncio.sleep(10)
+        except Exception as e:
+            print(f"Report error {e}")
+            await asyncio.sleep(60)
 
 def init_db():
     conn = sqlite3.connect("trading_data.db")
@@ -345,10 +394,10 @@ def init_db():
     conn.close()
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("StarFx V10.3 ATR Live\n/signal /price /news /performance")
+    await update.message.reply_text("StarFx V10.6 Live - XAU, GBP, V75\n/signal /price /news /performance /report")
 
 async def signal_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Scanning A+ ATR...")
+    await update.message.reply_text("Scanning A+...")
     found=0
     for sym in SYMBOLS:
         setup = evaluate_aplus_setup(sym)
@@ -356,8 +405,9 @@ async def signal_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             found+=1
             chart = generate_tradingview_chart(setup['df'], sym, setup)
             ep = format_price(sym, setup['price'])
+            dname = "Volatility 75 Index" if "R_75" in sym else sym
             with open(chart, "rb") as photo:
-                await context.bot.send_photo(chat_id=update.effective_chat.id, photo=photo, caption=f"{setup['bias']} {sym} Entry {ep}")
+                await context.bot.send_photo(chat_id=update.effective_chat.id, photo=photo, caption=f"{setup['bias']} {dname} Entry {ep}")
             if os.path.exists(chart):
                 os.remove(chart)
     if found==0:
@@ -366,9 +416,10 @@ async def signal_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def price_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg="💰 Live Prices:\n"
     for sym in SYMBOLS:
-        df = fetch_data(sym, '5m', 2)
-        if df is not None:
-            msg+= f"{sym}: {format_price(sym, df['close'].iloc[-1])}\n"
+        p = fetch_current_price(sym)
+        dname = "Volatility 75 Index" if "R_75" in sym else sym
+        if p is not None:
+            msg+= f"{dname}: {format_price(sym, p)}\n"
     await update.message.reply_text(msg)
 
 async def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -380,25 +431,22 @@ async def performance_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     wr = daily_stats['wins'] / total * 100 if total>0 else 0
     await update.message.reply_text(f"WR {wr:.1f}% Wins {daily_stats['wins']} Losses {daily_stats['losses']} TP1 {daily_stats['tp1_hits']} Active {len(active_trades)}")
 
+async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    report = f"📊 MANUAL REPORT {datetime.now(timezone.utc).date()}\n\n"
+    for sym in SYMBOLS:
+        df = fetch_data(sym, '1d', 5)
+        if df is not None:
+            dname = "Volatility 75 Index" if "R_75" in sym else sym
+            report+= f"{dname}: {format_price(sym, df['close'].iloc[-1])}\n"
+    total = daily_stats['wins'] + daily_stats['losses']
+    wr = daily_stats['wins']/total*100 if total>0 else 0
+    report+= f"\nWR {wr:.1f}% Wins {daily_stats['wins']} Losses {daily_stats['losses']} TP1 {daily_stats['tp1_hits']}\nActive {len(active_trades)}"
+    await update.message.reply_text(report)
+    try:
+        await context.bot.send_message(chat_id=CHAT_ID, text=report)
+    except:
+        pass
+
 async def main():
     init_db()
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CommandHandler("signal", signal_command))
-    app.add_handler(CommandHandler("scan", signal_command))
-    app.add_handler(CommandHandler("price", price_command))
-    app.add_handler(CommandHandler("news", news_command))
-    app.add_handler(CommandHandler("performance", performance_command))
-    app.add_handler(CommandHandler("WR", performance_command))
-    asyncio.create_task(market_scanner(app))
-    asyncio.create_task(track_positions(app))
-    asyncio.create_task(schedule_daily_report(app))
-    print("V10.3 ATR Online")
-    async with app:
-        await app.initialize()
-        await app.start()
-        await app.updater.start_polling()
-        await asyncio.Event().wait()
-
-if __name__ == "__main__":
-    asyncio.run(main())
+    app = Application.builder().t
