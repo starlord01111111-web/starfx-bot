@@ -1,7 +1,7 @@
+ccxt
 python-telegram-bot==20.7
-ccxt==4.2.25
-pandas
-mplfinance
 matplotlib
+mplfinance
+pandas
 requests
 websocket-client
