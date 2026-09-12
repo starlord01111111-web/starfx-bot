@@ -19,10 +19,9 @@ import requests
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-TELEGRAM_TOKEN =  "8656945768:AAG1avs7PEkGlwJ6VI8cBiOyclOIqmyPjDA"
-CHAT_ID =  "-1004365660319"
+TELEGRAM_TOKEN = "8656945768:AAG1avs7PEkGlwJ6VI8cBiOyclOIqmyPjDA"
+CHAT_ID = "-1004365660319"
 
-# V10.7 - WEEKEND MODE
 WEEKDAY_SYMBOLS = ["XAU/USD", "GBP/USD", "R_75"]
 WEEKEND_SYMBOLS = ["R_75", "R_100", "BOOM1000", "CRASH1000"]
 NEWS_CURRENCY = ["USD", "GBP"]
@@ -37,9 +36,11 @@ daily_stats = {"date": None, "losses_today": 0.0, "is_circuit_broken": False, "w
 active_trades = []
 last_signal_time = {}
 
+def is_paused():
+    return os.path.exists("PAUSE") or os.path.exists("pause")
+
 def get_active_symbols():
     now = datetime.now(timezone.utc)
-    # Saturday=5, Sunday=6 - Forex closed
     if now.weekday() >= 5:
         return WEEKEND_SYMBOLS
     return WEEKDAY_SYMBOLS
@@ -66,6 +67,14 @@ def format_price(symbol, price):
     if "XAU" in symbol or "R_" in symbol or "BOOM" in symbol or "CRASH" in symbol:
         return f"{price:.2f}"
     return f"{price:.5f}"
+
+def format_lots(symbol, units):
+    if "R_" in symbol or "BOOM" in symbol or "CRASH" in symbol:
+        return "0.001 Lots (Min) - Risk $20"
+    lots = units / 100000
+    if lots < 0.01:
+        lots = 0.01
+    return f"{lots:.2f} Lots"
 
 def calculate_position_size(balance, risk_pct, entry, sl):
     risk = abs(entry - sl)
@@ -216,9 +225,13 @@ def evaluate_aplus_setup(symbol):
     if pd.isna(atr) or atr == 0:
         atr = price * 0.001
 
-    if "R_" in symbol or "BOOM" in symbol or "CRASH" in symbol:
+    if "R_75" in symbol:
         min_sl = price * 0.002
-        atr_mult = 2.0
+        atr_mult = 4.0 # Wick-proof V75
+        sl = (m5['low'].iloc[-3:].min() - max(min_sl, atr*atr_mult)) if "BULLISH" in m5_pa else (m5['high'].iloc[-3:].max() + max(min_sl, atr*atr_mult))
+    elif "R_" in symbol or "BOOM" in symbol or "CRASH" in symbol:
+        min_sl = price * 0.002
+        atr_mult = 2.5
         sl = (m5['low'].iloc[-3:].min() - max(min_sl, atr*atr_mult)) if "BULLISH" in m5_pa else (m5['high'].iloc[-3:].max() + max(min_sl, atr*atr_mult))
     elif "XAU" in symbol:
         sl = (m5['low'].iloc[-3:].min() - max(2.0, atr*1.5)) if "BULLISH" in m5_pa else (m5['high'].iloc[-3:].max() + max(2.0, atr*1.5))
@@ -234,9 +247,12 @@ def evaluate_aplus_setup(symbol):
         return {"symbol": symbol, "bias": "SELL", "price": price, "sl": sl, "tp1": price - risk*1.5, "tp2": price - risk*3.0, "position_units": calculate_position_size(ACCOUNT_BALANCE, RISK_PER_TRADE_PCT, price, sl), "df": m5, "tp1_hit": False}
 
 async def track_positions(app: Application):
-    print("Tracker V10.7 Weekend Mode")
+    print("Tracker V10.8 15min cooldown + Pause")
     while True:
         try:
+            if is_paused():
+                await asyncio.sleep(60)
+                continue
             for trade in list(active_trades):
                 current_price = fetch_current_price(trade['symbol'])
                 if current_price is None:
@@ -291,13 +307,18 @@ async def track_positions(app: Application):
             await asyncio.sleep(10)
 
 async def market_scanner(app: Application):
-    print("Scanner V10.7 Weekend Mode Live")
+    print("Scanner V10.8 15min cooldown Live")
     last_m5 = {}
     while True:
         try:
+            if is_paused():
+                print("Paused - sleeping 60s")
+                await asyncio.sleep(60)
+                continue
             symbols_now = get_active_symbols()
             for symbol in symbols_now:
-                if symbol in last_signal_time and time.time() - last_signal_time[symbol] < 1800:
+                # 15 MIN COOLDOWN
+                if symbol in last_signal_time and time.time() - last_signal_time[symbol] < 900:
                     continue
                 m5_df = fetch_data(symbol, '5m', 5)
                 if m5_df is None:
@@ -313,9 +334,9 @@ async def market_scanner(app: Application):
                     slp = format_price(symbol, setup['sl'])
                     tp1p = format_price(symbol, setup['tp1'])
                     tp2p = format_price(symbol, setup['tp2'])
-                    lots = setup['position_units'] / 100000
                     display_sym = symbol.replace("R_75", "Volatility 75 Index").replace("R_100", "Volatility 100 Index").replace("BOOM1000", "Boom 1000").replace("CRASH1000", "Crash 1000")
-                    caption = f"🎯 {setup['bias']} {display_sym}\nEntry {ep}\nSL {slp}\nTP1 {tp1p} (1:1.5)\nTP2 {tp2p} (1:3)\nSize {lots:.2f} Lots\nMode: {'WEEKEND' if datetime.now(timezone.utc).weekday()>=5 else 'WEEKDAY'}"
+                    size_text = format_lots(symbol, setup['position_units'])
+                    caption = f"🎯 {setup['bias']} {display_sym}\nEntry {ep}\nSL {slp}\nTP1 {tp1p} (1:1.5)\nTP2 {tp2p} (1:3)\nSize {size_text}\nMode: {'WEEKEND' if datetime.now(timezone.utc).weekday()>=5 else 'WEEKDAY'}"
                     try:
                         with open(chart, "rb") as photo:
                             await app.bot.send_photo(chat_id=CHAT_ID, photo=photo, caption=caption)
@@ -346,9 +367,10 @@ async def schedule_daily_report(app: Application):
                         if df is not None:
                             dname = sym.replace("R_75", "V75").replace("R_100", "V100")
                             report+= f"{dname}: {format_price(sym, df['close'].iloc[-1])}\n"
-                    total = daily_stats['wins'] + daily_stats['losses']
-                    wr = daily_stats['wins']/total*100 if total>0 else 0
-                    report+= f"\nWR {wr:.1f}% Wins {daily_stats['wins']} Losses {daily_stats['losses']} TP1 {daily_stats['tp1_hits']}\nActive {len(active_trades)}"
+                    total = daily_stats['wins'] + daily_stats['losses'] + daily_stats['tp1_hits']
+                    real_wins = daily_stats['wins'] + daily_stats['tp1_hits']
+                    wr = real_wins/total*100 if total>0 else 0
+                    report+= f"\nWR {wr:.1f}% Wins {real_wins} Losses {daily_stats['losses']} TP1 {daily_stats['tp1_hits']} TP2 {daily_stats['wins']}\nActive {len(active_trades)}"
                     try:
                         await app.bot.send_message(chat_id=CHAT_ID, text=report)
                         sent_today = now_utc.date()
@@ -366,7 +388,8 @@ def init_db():
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mode = "WEEKEND" if datetime.now(timezone.utc).weekday()>=5 else "WEEKDAY"
-    await update.message.reply_text(f"StarFx V10.7 Live {mode} Mode\nActive: {', '.join(get_active_symbols())}\n/signal /price /report")
+    status = "⏸️ PAUSED" if is_paused() else "▶️ RUNNING"
+    await update.message.reply_text(f"StarFx V10.8 {status} Live {mode} Mode\nActive: {', '.join(get_active_symbols())}\nCooldown 15min\n/signal /price /report")
 
 async def signal_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Scanning {', '.join(get_active_symbols())}...")
@@ -396,14 +419,10 @@ async def price_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     symbols_now = get_active_symbols()
-    report = f"📊 MANUAL REPORT {datetime.now(timezone.utc).date()} Mode: {'WEEKEND' if datetime.now(timezone.utc).weekday()>=5 else 'WEEKDAY'}\n\n"
-    for sym in symbols_now:
-        df = fetch_data(sym, '1d', 5)
-        if df is not None:
-            report+= f"{sym}: {format_price(sym, df['close'].iloc[-1])}\n"
-    total = daily_stats['wins'] + daily_stats['losses']
-    wr = daily_stats['wins']/total*100 if total>0 else 0
-    report+= f"\nWR {wr:.1f}% Wins {daily_stats['wins']} Losses {daily_stats['losses']} TP1 {daily_stats['tp1_hits']}"
+    total = daily_stats['wins'] + daily_stats['losses'] + daily_stats['tp1_hits']
+    real_wins = daily_stats['wins'] + daily_stats['tp1_hits']
+    wr = real_wins/total*100 if total>0 else 0
+    report = f"📊 MANUAL REPORT {datetime.now(timezone.utc).date()} Mode: {'WEEKEND' if datetime.now(timezone.utc).weekday()>=5 else 'WEEKDAY'}\nStatus: {'PAUSED' if is_paused() else 'RUNNING'}\n\nWR {wr:.1f}% Wins {real_wins} Losses {daily_stats['losses']} TP1 {daily_stats['tp1_hits']} TP2 {daily_stats['wins']}"
     await update.message.reply_text(report)
     try:
         await context.bot.send_message(chat_id=CHAT_ID, text=report)
@@ -415,19 +434,4 @@ async def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("signal", signal_command))
-    app.add_handler(CommandHandler("scan", signal_command))
-    app.add_handler(CommandHandler("price", price_command))
-    app.add_handler(CommandHandler("report", report_command))
-    app.add_handler(CommandHandler("daily", report_command))
-    asyncio.create_task(market_scanner(app))
-    asyncio.create_task(track_positions(app))
-    asyncio.create_task(schedule_daily_report(app))
-    print("V10.7 Online - Weekend Mode")
-    async with app:
-        await app.initialize()
-        await app.start()
-        await app.updater.start_polling()
-        await asyncio.Event().wait()
-
-if __name__ == "__main__":
-    asyncio.run(main())
+    app.add_handler(CommandH
