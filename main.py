@@ -24,7 +24,6 @@ CHAT_ID = "-1004365660319"
 
 WEEKDAY_SYMBOLS = ["XAU/USD", "GBP/USD", "R_75"]
 WEEKEND_SYMBOLS = ["R_75", "R_100", "BOOM1000", "CRASH1000"]
-NEWS_CURRENCY = ["USD", "GBP"]
 
 ACCOUNT_BALANCE = 10000.00
 RISK_PER_TRADE_PCT = 0.01
@@ -62,8 +61,7 @@ def start_dummy_server():
 threading.Thread(target=start_dummy_server, daemon=True).start()
 
 def format_price(symbol, price):
-    if price is None:
-        return "N/A"
+    if price is None: return "N/A"
     if "XAU" in symbol or "R_" in symbol or "BOOM" in symbol or "CRASH" in symbol:
         return f"{price:.2f}"
     return f"{price:.5f}"
@@ -72,14 +70,12 @@ def format_lots(symbol, units):
     if "R_" in symbol or "BOOM" in symbol or "CRASH" in symbol:
         return "0.001 Lots (Min) - Risk $20"
     lots = units / 100000
-    if lots < 0.01:
-        lots = 0.01
+    if lots < 0.01: lots = 0.01
     return f"{lots:.2f} Lots"
 
 def calculate_position_size(balance, risk_pct, entry, sl):
     risk = abs(entry - sl)
-    if risk == 0:
-        return 0
+    if risk == 0: return 0
     return round((balance * risk_pct) / risk, 4)
 
 def check_circuit_breaker():
@@ -99,17 +95,14 @@ def fetch_deriv_data(symbol, timeframe, limit=100):
         gran_map = {'1m': 60, '5m': 300, '15m': 900, '1h': 3600, '4h': 14400, '1d': 86400}
         gran = gran_map.get(timeframe, 300)
         deriv_symbol = symbol
-        if "BOOM1000" in symbol:
-            deriv_symbol = "BOOM_1000"
-        elif "CRASH1000" in symbol:
-            deriv_symbol = "CRASH_1000"
+        if "BOOM1000" in symbol: deriv_symbol = "BOOM_1000"
+        elif "CRASH1000" in symbol: deriv_symbol = "CRASH_1000"
         ws = websocket.create_connection("wss://ws.derivws.com/websockets/v3?app_id=1089", timeout=10)
         req = {"ticks_history": deriv_symbol, "adjust_start_time": 1, "count": limit, "end": "latest", "granularity": gran, "style": "candles"}
         ws.send(json.dumps(req))
         res = json.loads(ws.recv())
         ws.close()
-        if "candles" not in res:
-            return None
+        if "candles" not in res: return None
         candles = res["candles"]
         df = pd.DataFrame(candles)
         df['timestamp'] = pd.to_datetime(df['epoch'], unit='s', utc=True)
@@ -130,37 +123,30 @@ def fetch_data(symbol, timeframe, limit=100):
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
         df.set_index('timestamp', inplace=True)
         return df
-    except:
-        return None
+    except: return None
 
 def fetch_current_price(symbol):
     if "R_" in symbol or "BOOM" in symbol or "CRASH" in symbol:
         try:
             import websocket
             deriv_symbol = symbol
-            if "BOOM1000" in symbol:
-                deriv_symbol = "BOOM_1000"
-            elif "CRASH1000" in symbol:
-                deriv_symbol = "CRASH_1000"
+            if "BOOM1000" in symbol: deriv_symbol = "BOOM_1000"
+            elif "CRASH1000" in symbol: deriv_symbol = "CRASH_1000"
             ws = websocket.create_connection("wss://ws.derivws.com/websockets/v3?app_id=1089", timeout=5)
             ws.send(json.dumps({"ticks": deriv_symbol}))
             res = json.loads(ws.recv())
             ws.close()
-            if "tick" in res:
-                return float(res["tick"]["quote"])
-        except:
-            pass
+            if "tick" in res: return float(res["tick"]["quote"])
+        except: pass
         df = fetch_deriv_data(symbol, '1m', 2)
-        if df is not None:
-            return df['close'].iloc[-1]
+        if df is not None: return df['close'].iloc[-1]
         return None
     try:
         ticker = exchange.fetch_ticker(symbol)
         return ticker['last']
     except:
         df = fetch_data(symbol, '1m', 2)
-        if df is not None:
-            return df['close'].iloc[-1]
+        if df is not None: return df['close'].iloc[-1]
     return None
 
 def generate_tradingview_chart(df, symbol, setup, filename="chart.png"):
@@ -175,59 +161,45 @@ def generate_tradingview_chart(df, symbol, setup, filename="chart.png"):
     return filename
 
 def analyze_structure(df, window=20):
-    if df is None or len(df) < window+1:
-        return "NEUTRAL"
+    if df is None or len(df) < window+1: return "NEUTRAL"
     recent = df.iloc[:-1]
     high = recent['high'].iloc[-window:].max()
     low = recent['low'].iloc[-window:].min()
     curr = df['close'].iloc[-1]
-    if curr > high:
-        return "BULLISH"
-    if curr < low:
-        return "BEARISH"
+    if curr > high: return "BULLISH"
+    if curr < low: return "BEARISH"
     ema = df['close'].ewm(span=20).mean().iloc[-1]
     return "BULLISH" if curr > ema else "BEARISH"
 
 def detect_price_action(df):
-    if df is None or len(df) < 3:
-        return None
+    if df is None or len(df) < 3: return None
     c1 = df.iloc[-2]
     body = abs(c1['close'] - c1['open'])
     uw = c1['high'] - max(c1['close'], c1['open'])
     lw = min(c1['close'], c1['open']) - c1['low']
-    if lw >= (2*body) and uw <= (0.5*body):
-        return "BULLISH_PINBAR"
-    if uw >= (2*body) and lw <= (0.5*body):
-        return "BEARISH_PINBAR"
-    if c1['close'] > c1['open'] and df.iloc[-3]['close'] < df.iloc[-3]['open']:
-        return "BULLISH_ENGULFING"
-    if c1['close'] < c1['open'] and df.iloc[-3]['close'] > df.iloc[-3]['open']:
-        return "BEARISH_ENGULFING"
+    if lw >= (2*body) and uw <= (0.5*body): return "BULLISH_PINBAR"
+    if uw >= (2*body) and lw <= (0.5*body): return "BEARISH_PINBAR"
+    if c1['close'] > c1['open'] and df.iloc[-3]['close'] < df.iloc[-3]['open']: return "BULLISH_ENGULFING"
+    if c1['close'] < c1['open'] and df.iloc[-3]['close'] > df.iloc[-3]['open']: return "BEARISH_ENGULFING"
     return None
 
 def evaluate_aplus_setup(symbol):
-    if not check_circuit_breaker() or len(active_trades) >= MAX_CONCURRENT_TRADES:
-        return None
+    if not check_circuit_breaker() or len(active_trades) >= MAX_CONCURRENT_TRADES: return None
     h4 = fetch_data(symbol, '4h')
     h1 = fetch_data(symbol, '1h')
     m5 = fetch_data(symbol, '5m')
-    if h4 is None or h1 is None or m5 is None:
-        return None
+    if h4 is None or h1 is None or m5 is None: return None
     h4_bias = analyze_structure(h4)
     h1_bias = analyze_structure(h1)
-    if h4_bias!= h1_bias or h4_bias == "NEUTRAL":
-        return None
+    if h4_bias!= h1_bias or h4_bias == "NEUTRAL": return None
     m5_pa = detect_price_action(m5)
-    if not m5_pa:
-        return None
+    if not m5_pa: return None
     price = m5['close'].iloc[-1]
     atr = (m5['high'] - m5['low']).rolling(14).mean().iloc[-1]
-    if pd.isna(atr) or atr == 0:
-        atr = price * 0.001
-
+    if pd.isna(atr) or atr == 0: atr = price * 0.001
     if "R_75" in symbol:
         min_sl = price * 0.002
-        atr_mult = 4.0 # Wick-proof V75
+        atr_mult = 4.0
         sl = (m5['low'].iloc[-3:].min() - max(min_sl, atr*atr_mult)) if "BULLISH" in m5_pa else (m5['high'].iloc[-3:].max() + max(min_sl, atr*atr_mult))
     elif "R_" in symbol or "BOOM" in symbol or "CRASH" in symbol:
         min_sl = price * 0.002
@@ -237,17 +209,15 @@ def evaluate_aplus_setup(symbol):
         sl = (m5['low'].iloc[-3:].min() - max(2.0, atr*1.5)) if "BULLISH" in m5_pa else (m5['high'].iloc[-3:].max() + max(2.0, atr*1.5))
     else:
         sl = (m5['low'].iloc[-3:].min() - atr*1.2) if "BULLISH" in m5_pa else (m5['high'].iloc[-3:].max() + atr*1.2)
-
     risk = abs(price - sl)
-    if risk <=0:
-        return None
+    if risk <=0: return None
     if "BULLISH" in m5_pa:
         return {"symbol": symbol, "bias": "BUY", "price": price, "sl": sl, "tp1": price + risk*1.5, "tp2": price + risk*3.0, "position_units": calculate_position_size(ACCOUNT_BALANCE, RISK_PER_TRADE_PCT, price, sl), "df": m5, "tp1_hit": False}
     else:
         return {"symbol": symbol, "bias": "SELL", "price": price, "sl": sl, "tp1": price - risk*1.5, "tp2": price - risk*3.0, "position_units": calculate_position_size(ACCOUNT_BALANCE, RISK_PER_TRADE_PCT, price, sl), "df": m5, "tp1_hit": False}
 
 async def track_positions(app: Application):
-    print("Tracker V10.8 15min cooldown + Pause")
+    print("Tracker V10.9 1h + dedup")
     while True:
         try:
             if is_paused():
@@ -255,8 +225,7 @@ async def track_positions(app: Application):
                 continue
             for trade in list(active_trades):
                 current_price = fetch_current_price(trade['symbol'])
-                if current_price is None:
-                    continue
+                if current_price is None: continue
                 sym = trade['symbol']
                 display_sym = sym.replace("R_75", "Volatility 75 Index").replace("R_100", "Volatility 100 Index")
                 ep = format_price(sym, trade['price'])
@@ -264,7 +233,6 @@ async def track_positions(app: Application):
                 tp1p = format_price(sym, trade['tp1'])
                 tp2p = format_price(sym, trade['tp2'])
                 curr_p = format_price(sym, current_price)
-
                 if trade['bias'] == "BUY":
                     if not trade['tp1_hit'] and current_price >= trade['tp1']:
                         trade['tp1_hit'] = True
@@ -307,7 +275,7 @@ async def track_positions(app: Application):
             await asyncio.sleep(10)
 
 async def market_scanner(app: Application):
-    print("Scanner V10.8 15min cooldown Live")
+    print("Scanner V10.9 1h cooldown Live")
     last_m5 = {}
     while True:
         try:
@@ -317,18 +285,37 @@ async def market_scanner(app: Application):
                 continue
             symbols_now = get_active_symbols()
             for symbol in symbols_now:
-                # 15 MIN COOLDOWN
-                if symbol in last_signal_time and time.time() - last_signal_time[symbol] < 900:
+                # V10.9: 1 HOUR COOLDOWN
+                if symbol in last_signal_time and time.time() - last_signal_time[symbol] < 3600:
                     continue
+                # V10.9: NO DUPLICATE DIRECTION
+                has_same_dir = False
+                for t in active_trades:
+                    if t['symbol'] == symbol and t['bias'] in ["BUY","SELL"]:
+                        # If already have active trade in same direction, skip
+                        # We will check setup bias later, so just block if any active on that symbol
+                        has_same_dir = True
+                        break
+                if has_same_dir:
+                    continue
+
                 m5_df = fetch_data(symbol, '5m', 5)
-                if m5_df is None:
-                    continue
+                if m5_df is None: continue
                 cur = m5_df.index[-1]
-                if last_m5.get(symbol) == cur:
-                    continue
+                if last_m5.get(symbol) == cur: continue
                 last_m5[symbol]=cur
                 setup = evaluate_aplus_setup(symbol)
                 if setup:
+                    # Double check duplicate bias after setup is known
+                    duplicate = False
+                    for t in active_trades:
+                        if t['symbol'] == symbol and t['bias'] == setup['bias']:
+                            duplicate = True
+                            break
+                    if duplicate:
+                        print(f"Skip duplicate {symbol} {setup['bias']}")
+                        continue
+
                     chart = generate_tradingview_chart(setup['df'], symbol, setup)
                     ep = format_price(symbol, setup['price'])
                     slp = format_price(symbol, setup['sl'])
@@ -342,11 +329,10 @@ async def market_scanner(app: Application):
                             await app.bot.send_photo(chat_id=CHAT_ID, photo=photo, caption=caption)
                         active_trades.append(setup)
                         last_signal_time[symbol] = time.time()
-                        print(f"Sent {symbol}")
+                        print(f"Sent {symbol} {setup['bias']}")
                     except Exception as e:
                         print(f"Ghost prevented {symbol}: {e}")
-                    if os.path.exists(chart):
-                        os.remove(chart)
+                    if os.path.exists(chart): os.remove(chart)
                     await asyncio.sleep(3)
             await asyncio.sleep(30)
         except Exception as e:
@@ -361,7 +347,7 @@ async def schedule_daily_report(app: Application):
             if now_utc.hour == 20 and now_utc.minute <= 10:
                 if sent_today!= now_utc.date():
                     symbols_now = get_active_symbols()
-                    report = f"📊 DAILY REPORT 23:00 EAT {now_utc.date()}\nMode: {'WEEKEND' if now_utc.weekday()>=5 else 'WEEKDAY'}\nActive Symbols: {', '.join(symbols_now)}\n\n"
+                    report = f"📊 DAILY REPORT 23:00 EAT {now_utc.date()}\nMode: {'WEEKEND' if now_utc.weekday()>=5 else 'WEEKDAY'}\nCooldown: 1HOUR\nActive Symbols: {', '.join(symbols_now)}\n\n"
                     for sym in symbols_now:
                         df = fetch_data(sym, '1d', 5)
                         if df is not None:
@@ -374,11 +360,9 @@ async def schedule_daily_report(app: Application):
                     try:
                         await app.bot.send_message(chat_id=CHAT_ID, text=report)
                         sent_today = now_utc.date()
-                    except:
-                        pass
+                    except: pass
             await asyncio.sleep(60)
-        except:
-            await asyncio.sleep(60)
+        except: await asyncio.sleep(60)
 
 def init_db():
     conn = sqlite3.connect("trading_data.db")
@@ -389,7 +373,7 @@ def init_db():
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mode = "WEEKEND" if datetime.now(timezone.utc).weekday()>=5 else "WEEKDAY"
     status = "⏸️ PAUSED" if is_paused() else "▶️ RUNNING"
-    await update.message.reply_text(f"StarFx V10.8 {status} Live {mode} Mode\nActive: {', '.join(get_active_symbols())}\nCooldown 15min\n/signal /price /report")
+    await update.message.reply_text(f"StarFx V10.9 {status} Live {mode} Mode\nCooldown 1HOUR no dup\nActive: {', '.join(get_active_symbols())}\n/signal /price /report")
 
 async def signal_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Scanning {', '.join(get_active_symbols())}...")
@@ -403,8 +387,7 @@ async def signal_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             dname = sym.replace("R_75", "Volatility 75 Index")
             with open(chart, "rb") as photo:
                 await context.bot.send_photo(chat_id=update.effective_chat.id, photo=photo, caption=f"{setup['bias']} {dname} Entry {ep}")
-            if os.path.exists(chart):
-                os.remove(chart)
+            if os.path.exists(chart): os.remove(chart)
     if found==0:
         await update.message.reply_text("No A+ setup now.")
 
@@ -413,8 +396,7 @@ async def price_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for sym in get_active_symbols():
         p = fetch_current_price(sym)
         dname = sym.replace("R_75", "Volatility 75 Index").replace("R_100", "Volatility 100").replace("BOOM1000", "Boom 1000").replace("CRASH1000", "Crash 1000")
-        if p is not None:
-            msg+= f"{dname}: {format_price(sym, p)}\n"
+        if p is not None: msg+= f"{dname}: {format_price(sym, p)}\n"
     await update.message.reply_text(msg)
 
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -422,31 +404,4 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     total = daily_stats['wins'] + daily_stats['losses'] + daily_stats['tp1_hits']
     real_wins = daily_stats['wins'] + daily_stats['tp1_hits']
     wr = real_wins/total*100 if total>0 else 0
-    report = f"📊 MANUAL REPORT {datetime.now(timezone.utc).date()} Mode: {'WEEKEND' if datetime.now(timezone.utc).weekday()>=5 else 'WEEKDAY'}\nStatus: {'PAUSED' if is_paused() else 'RUNNING'}\n\nWR {wr:.1f}% Wins {real_wins} Losses {daily_stats['losses']} TP1 {daily_stats['tp1_hits']} TP2 {daily_stats['wins']}"
-    await update.message.reply_text(report)
-    try:
-        await context.bot.send_message(chat_id=CHAT_ID, text=report)
-    except:
-        pass
-
-async def main():
-    init_db()
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CommandHandler("signal", signal_command))
-    app.add_handler(CommandHandler("scan", signal_command))
-    app.add_handler(CommandHandler("price", price_command))
-    app.add_handler(CommandHandler("report", report_command))
-    app.add_handler(CommandHandler("daily", report_command))
-    asyncio.create_task(market_scanner(app))
-    asyncio.create_task(track_positions(app))
-    asyncio.create_task(schedule_daily_report(app))
-    print("V10.8 Online - 15min cooldown + Pause")
-    async with app:
-        await app.initialize()
-        await app.start()
-        await app.updater.start_polling()
-        await asyncio.Event().wait()
-
-if __name__ == "__main__":
-    asyncio.run(main())
+    report = f"📊 MANUAL REPORT {datetime.now(timezone.utc).date()} Mode: {'WEEKEND' if datetime.now(timezone.utc).weekday()>=5 else 'WEEKDAY'}\nStatus: {'PAUSED'
