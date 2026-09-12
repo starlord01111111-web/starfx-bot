@@ -434,4 +434,19 @@ async def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("signal", signal_command))
-    app.add_handler(CommandH
+    app.add_handler(CommandHandler("scan", signal_command))
+    app.add_handler(CommandHandler("price", price_command))
+    app.add_handler(CommandHandler("report", report_command))
+    app.add_handler(CommandHandler("daily", report_command))
+    asyncio.create_task(market_scanner(app))
+    asyncio.create_task(track_positions(app))
+    asyncio.create_task(schedule_daily_report(app))
+    print("V10.8 Online - 15min cooldown + Pause")
+    async with app:
+        await app.initialize()
+        await app.start()
+        await app.updater.start_polling()
+        await asyncio.Event().wait()
+
+if __name__ == "__main__":
+    asyncio.run(main())
