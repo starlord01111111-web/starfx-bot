@@ -4,3 +4,4 @@ pandas
 mplfinance
 matplotlib
 requests
+websocket-client
