@@ -24,8 +24,8 @@ SYMBOL_MAP = {
     "GBP/USD": "frxGBPUSD",
     "R_75": "R_75",
     "R_100": "R_100",
-    "BOOM1000": "BOOM_1000",
-    "CRASH1000": "CRASH_1000",
+    "BOOM_1000": "BOOM_1000",
+    "CRASH_1000": "CRASH_1000",
 }
 
 def to_deriv_symbol(s): return SYMBOL_MAP.get(s, s)
