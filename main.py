@@ -77,16 +77,9 @@ async def fetch_data(symbol, tf="M5"):
     return df
 
 async def fetch_current_price(symbol):
-    try:
-        uri = f"wss://ws.derivws.com/websockets/v3?app_id={DERIV_APP_ID}"
-        async with websockets.connect(uri) as ws:
-            await ws.send(json.dumps({"ticks": to_deriv_symbol(symbol)}))
-            resp = await asyncio.wait_for(ws.recv(), timeout=5)
-            data = json.loads(resp)
-            if "tick" in data and "quote" in data["tick"]:
-                return float(data["tick"]["quote"])
-    except:
-        return None
+    df = await fetch_candles(to_deriv_symbol(symbol), granularity=60, count=1)
+    if df is not None and len(df)>0:
+        return float(df['close'].iloc[-1])
     return None
 
 # === BIBLE LOGIC ===
