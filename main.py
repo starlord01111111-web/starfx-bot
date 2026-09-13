@@ -312,7 +312,7 @@ async def market_scanner(app):
                 if not setup: continue
                 if not check_circuit_breaker(): continue
                 chart=generate_tradingview_chart(setup['df'],symbol,setup)
-                                ep=format_price(symbol,setup['price']); slp=format_price(symbol,setup['sl']); tp1p=format_price(symbol,setup['tp1']); tp2p=format_price(symbol,setup['tp2'])
+                ep=format_price(symbol,setup['price']); slp=format_price(symbol,setup['sl']); tp1p=format_price(symbol,setup['tp1']); tp2p=format_price(symbol,setup['tp2'])
                 disp=symbol.replace("R_75","V75").replace("R_100","V100")
                 cap=(f"🎯 {setup['bias']} {disp} {setup['pattern']}\n"
                      f"Confluence: {setup['score']}/2 {','.join(setup['reasons'])}\n"
