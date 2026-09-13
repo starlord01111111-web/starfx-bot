@@ -16,16 +16,14 @@ TELEGRAM_CHAT_ID = "-1004365660319"
 DERIV_APP_ID = os.getenv("DERIV_APP_ID", "1089")
 
 WEEKDAY_SYMBOLS = ["XAU/USD", "GBP/USD", "R_75"]
-WEEKEND_SYMBOLS = ["R_75", "R_100", "BOOM_1000", "CRASH_1000"]
+WEEKEND_SYMBOLS = ["R_75", "R_100"]
 
 # FIXED MAPPING - underscore is required
 SYMBOL_MAP = {
     "XAU/USD": "frxXAUUSD",
     "GBP/USD": "frxGBPUSD",
     "R_75": "R_75",
-    "R_100": "R_100",
-    "BOOM_1000": "BOOM_1000",
-    "CRASH_1000": "CRASH_1000",
+    "R_100": "R_100"
 }
 
 def to_deriv_symbol(s): return SYMBOL_MAP.get(s, s)
