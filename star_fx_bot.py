@@ -79,8 +79,8 @@ log = logging.getLogger("starfx")
 # ---------------------------------------------------------------------------
 # Config / secrets
 # ---------------------------------------------------------------------------
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-CHAT_ID = os.environ.get("CHAT_ID")
+TELEGRAM_TOKEN = "8656945768:AAG1avs7PEkGlwJ6VI8cBiOyclOIqmyPjDA"
+CHAT_ID = "-1004365660319"
 
 if not TELEGRAM_TOKEN or not CHAT_ID:
     log.critical(
