@@ -320,33 +320,31 @@ def evaluate_setup_sync(df, target_bias, atr_val=None, min_bars=60):
             "sweep": sweep["kind"] if sweep else "none",
             "tl": tl_reason, "tl_obj": tl_obj}
 # ============================== LIVE ==============================
-last_signal_time = {}
-
 async def evaluate_setup(symbol):
-    if time.time() - last_signal_time.get(symbol, 0) < COOLDOWN_SEC: return None
+    if time.time() - last_signal_time.get(symbol, 0) < COOLDOWN_SEC:
+        return None
     m5  = await fetch_data(symbol, "M5")
     m15 = await fetch_data(symbol, "M15")
     h1  = await fetch_data(symbol, "H1")
     h4  = await fetch_data(symbol, "H4")
     if m5 is None or h1 is None or h4 is None: return None
     bh1, bh4 = htf_bias(h1), htf_bias(h4)
-if bh4 == "NEUTRAL": return None
-if bh1 == bh4 or bh1 == "NEUTRAL":
-    mode, target = "WITH_TREND", bh4
-    cands = [("M5", m5)]
-else:
-    mode, target = "COUNTER", bh4
-    cands = [("M5", m5), ("M15", m15)]
+    if bh4 == "NEUTRAL": return None
+    if bh1 == bh4 or bh1 == "NEUTRAL":
+        mode, target = "WITH_TREND", bh4
+        cands = [("M5", m5)]
+    else:
+        mode, target = "COUNTER", bh4
+        cands = [("M5", m5), ("M15", m15)]
 
-for tf_name, df in cands:
-    if df is None or len(df) < 60: continue
-    r = evaluate_setup_sync(df, target)
-    if r:
-        r.update({"symbol": symbol, "mode": mode, "tf": tf_name,
-                  "bh1": bh1, "bh4": bh4, "df": df})
-        return r
-return None
-
+    for tf_name, df in cands:
+        if df is None or len(df) < 60: continue
+        r = evaluate_setup_sync(df, target)
+        if r:
+            r.update({"symbol": symbol, "mode": mode, "tf": tf_name,
+                      "bh1": bh1, "bh4": bh4, "df": df})
+            return r
+    return None
 # ============================== DB ==============================
 _db_lock = Lock()
 
