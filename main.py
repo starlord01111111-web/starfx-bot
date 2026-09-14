@@ -46,7 +46,7 @@ DL_BATCH       = 2000
 def to_deriv(s): return SYMBOL_MAP.get(s, s)
 def fmt_price(sym, p): return f"{p:.2f}" if "R_" in sym else f"{p:.5f}"
 def get_active_symbols():
-    return WEEKEND_SYMBOLS if datetime.now(timezone.utc).weekday() >= 5 else WEEKDAY_SYMBOLS
+    return ["R_100"]   # TEMP: R_100 only while validating live edge
 
 # ============================== FLASK ==============================
 _flask = Flask("starfx")
