@@ -32,6 +32,11 @@ SYMBOL_MAP = {
     "R_75":    "R_75",
     "R_100":   "R_100",
 }
+# Backtest constants
+WARM_BARS        = 200
+COOLDOWN_BARS    = 12
+STEP             = 2
+MAX_TRADE_BARS   = 300
 GRAN = {"M5": 300, "M15": 900, "H1": 3600, "H4": 14400}
 COOLDOWN_SEC = 7200          # 2h between signals per symbol
 RR           = 2.0
