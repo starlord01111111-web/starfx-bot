@@ -726,9 +726,9 @@ async def signal_cmd(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
             text="❌ No qualifying setups right now.\n"
      f"Auto-scanner runs every 5 min. Active: {', '.join(get_active_symbols())}")
         async def autoscan_loop(app):
-    await asyncio.sleep(30)
-    while True:
-        try:
+            await asyncio.sleep(30)
+            while True:
+               try:
             for sym in get_active_symbols():
                 setup = await evaluate_setup(sym)
                 if not setup: continue
