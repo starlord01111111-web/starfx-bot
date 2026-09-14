@@ -33,7 +33,7 @@ SYMBOL_MAP = {
 }
 GRAN = {"M5": 300, "M15": 900, "H1": 3600, "H4": 14400}
 
-COOLDOWN_SEC   = 7200
+COOLDOWN_SEC   = 3600
 RR             = 2.0
 DB_PATH        = os.environ.get("DB_PATH", "signals.db")
 WARM_BARS      = 200
@@ -152,7 +152,7 @@ def find_pivots(df, left=2, right=2):
         if l[i] == min(l[i-left:i+right+1]): piv.append((i, l[i], "L"))
     return piv
 
-def detect_zones(df, lookback=120, impulse_atr=1.5):
+def detect_zones(df, lookback=120, impulse_atr=1.0):
     df = df.reset_index(drop=True)
     a = (df["high"] - df["low"]).rolling(14).mean()
     zones, n = [], len(df)
@@ -164,7 +164,7 @@ def detect_zones(df, lookback=120, impulse_atr=1.5):
         base = df.iloc[max(0, i-3):i]
         if len(base) < 1: continue
         bt, bb = base["high"].max(), base["low"].min()
-        if (bt - bb) > a.iloc[i] * 1.5: continue
+        if (bt - bb) > a.iloc[i] * 2.5: continue
         bull = df["close"].iloc[i] > df["open"].iloc[i]
         pre = df.iloc[max(0, i-6):max(0, i-3)]
         pre_bull = len(pre) >= 2 and pre["close"].iloc[-1] > pre["open"].iloc[0]
@@ -269,22 +269,25 @@ def evaluate_setup_sync(df, target_bias, atr_val=None, min_bars=60):
     if pd.isna(atr_val) or atr_val == 0: return None
 
     pat = detect_pattern(df)
-    if not pat or pat["bias"] != target_bias: return None
+    if not pat: return None
+    # Allow NEUTRAL patterns (InsideBar) to borrow HTF bias
+    if pat["bias"] != target_bias and pat["bias"] != "NEUTRAL":
+        return None
 
     zones = mark_freshness(detect_zones(df, 120), df)
     side = "demand" if target_bias == "BULL" else "supply"
     price = float(df["close"].iloc[-1])
     zone = next((z for z in zones if z["side"] == side and z["fresh"]
-                 and price_interacts_zone(df, z, side, 3, atr_val * 0.25)), None)
+                 and price_interacts_zone(df, z, side, 6, atr_val * 0.35)), None)
     if not zone: return None
 
-   pools = equal_levels(w, 0.0025)
-sweep = None
-for pool in pools:
-    sw = detect_sweep(w, pool, 20)
-    if sw and sw["bias"] == target and sw["idx"] >= len(w) - 20:
-        sweep = sw; break
-if not sweep: continue 
+    # Bonuses (optional)
+    pools = equal_levels(df, 0.0025)
+    sweep = None
+    for pool in pools:
+        sw = detect_sweep(df, pool, 20)
+        if sw and sw["bias"] == target_bias and sw["idx"] >= len(df) - 20:
+            sweep = sw; break
 
     piv = find_pivots(df)
     tl_h = fit_trendline(piv, "H", 2)
@@ -301,21 +304,21 @@ if not sweep: continue
             tl_ok, tl_reason, tl_obj = True, "TL_supply", tl_h
         elif tl_l and tl_break(tl_l, df, idx):
             tl_ok, tl_reason, tl_obj = True, "TL_break_dn", tl_l
-    if not tl_ok: return None
 
+    # NO requirement — bonuses are just metadata
     if target_bias == "BULL":
         sl = float(zone["bot"] - atr_val * 0.5); risk = price - sl
         tp = price + RR * risk
     else:
         sl = float(zone["top"] + atr_val * 0.5); risk = sl - price
         tp = price - RR * risk
-    if risk <= 0 or risk > atr_val * 4: return None
+    if risk <= 0 or risk > atr_val * 5: return None
 
     return {"bias": target_bias, "pattern": pat["pattern"],
             "entry": price, "sl": sl, "tp": tp, "atr": float(atr_val),
-            "zone_kind": zone["kind"], "sweep": sweep["kind"],
+            "zone_kind": zone["kind"],
+            "sweep": sweep["kind"] if sweep else "none",
             "tl": tl_reason, "tl_obj": tl_obj}
-
 # ============================== LIVE ==============================
 last_signal_time = {}
 
@@ -327,14 +330,14 @@ async def evaluate_setup(symbol):
     h4  = await fetch_data(symbol, "H4")
     if m5 is None or h1 is None or h4 is None: return None
     bh1, bh4 = htf_bias(h1), htf_bias(h4)
-    if bh4 != "NEUTRAL" and bh1 == bh4:
-        mode, target = "WITH_TREND", bh4
-        cands = [("M5", m5)]
-    elif bh4 != "NEUTRAL" and bh1 != "NEUTRAL" and bh4 != bh1:
-        mode, target = "COUNTER", bh4
-        cands = [("M5", m5), ("M15", m15)]
-    else:
-        return None
+    if bh4 == "NEUTRAL":
+    return None
+if bh1 == bh4 or bh1 == "NEUTRAL":
+    mode, target = "WITH_TREND", bh4
+    cands = [("M5", m5)]
+else:
+    mode, target = "COUNTER", bh4
+    cands = [("M5", m5), ("M15", m15)]
     for tf_name, df in cands:
         if df is None or len(df) < 60: continue
         r = evaluate_setup_sync(df, target)
@@ -589,7 +592,7 @@ def _diag_one_symbol(df_m5, df_m15, df_h1, df_h4, symbol):
     m5_ep = df_m5["epoch"].values; h1_ep = df_h1["epoch"].values
     h4_ep = df_h4["epoch"].values
     c = {"bars":0,"htf_ok":0,"pattern":0,"zone":0,"sweep":0,"trendline":0,"trade":0}
-    for i in range(WARM_BARS, n - 200, 10):
+    for i in range(WARM_BARS, n - 200, 5):              # step 5 instead of 10
         c["bars"] += 1
         av5 = a5_full.iloc[i]
         if pd.isna(av5) or av5 == 0: continue
@@ -599,28 +602,33 @@ def _diag_one_symbol(df_m5, df_m15, df_h1, df_h4, symbol):
         if h1_pos < 50 or h4_pos < 50: continue
         bh1 = htf_bias(df_h1.iloc[max(0,h1_pos-200):h1_pos+1])
         bh4 = htf_bias(df_h4.iloc[max(0,h4_pos-200):h4_pos+1])
-        if (bh4 != "NEUTRAL" and bh1 == bh4) or \
-           (bh4 != "NEUTRAL" and bh1 != "NEUTRAL" and bh4 != bh1):
+        if bh4 == "NEUTRAL": continue
+        if bh1 == bh4 or bh1 == "NEUTRAL":
             c["htf_ok"] += 1; target = bh4
-        else: continue
+        else:
+            c["htf_ok"] += 1; target = bh4
+
         w = df_m5.iloc[max(0, i-200):i+1].reset_index(drop=True)
         pat = detect_pattern(w)
-        if not pat or pat["bias"] != target: continue
+        if not pat: continue
+        if pat["bias"] != target and pat["bias"] != "NEUTRAL": continue
         c["pattern"] += 1
+
         zones = mark_freshness(detect_zones(w, 120), w)
         side = "demand" if target == "BULL" else "supply"
         zone = next((z for z in zones if z["side"] == side and z["fresh"]
-                     and price_interacts_zone(w, z, side, 3, av5*0.25)), None)
+                     and price_interacts_zone(w, z, side, 6, av5*0.35)), None)
         if not zone: continue
         c["zone"] += 1
-        pools = equal_levels(w, 0.0008)
+
+        pools = equal_levels(w, 0.0025)
         sweep = None
         for pool in pools:
-            sw = detect_sweep(w, pool, 8)
-            if sw and sw["bias"] == target and sw["idx"] >= len(w) - 8:
+            sw = detect_sweep(w, pool, 20)
+            if sw and sw["bias"] == target and sw["idx"] >= len(w) - 20:
                 sweep = sw; break
-        if not sweep: continue
-        c["sweep"] += 1
+        if sweep: c["sweep"] += 1
+
         piv = find_pivots(w)
         tl_h = fit_trendline(piv, "H", 2); tl_l = fit_trendline(piv, "L", 2)
         idx = len(w) - 1; tl_ok = False
@@ -630,13 +638,13 @@ def _diag_one_symbol(df_m5, df_m15, df_h1, df_h4, symbol):
         else:
             if tl_h and tl_touch(tl_h, w, idx, 0.6, av5): tl_ok = True
             elif tl_l and tl_break(tl_l, w, idx): tl_ok = True
-        if not tl_ok: continue
-        c["trendline"] += 1
+        if tl_ok: c["trendline"] += 1
+
         if target == "BULL":
             sl = float(zone["bot"] - av5*0.5); risk = w["close"].iloc[-1] - sl
         else:
             sl = float(zone["top"] + av5*0.5); risk = sl - w["close"].iloc[-1]
-        if risk <= 0 or risk > av5 * 4: continue
+        if risk <= 0 or risk > av5 * 5: continue
         c["trade"] += 1
     return {"symbol": symbol, **c}
 
