@@ -1,6 +1,6 @@
 """
-StarFX V15.1 — Supply/Demand + Liquidity + Trendlines + Counter-Trend + Real Backtest
-Single file. Set env vars: TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, DERIV_APP_ID
+StarFX V15.1 — full bot in one file
+Set env vars on Render: TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, DERIV_APP_ID
 """
 
 import os, asyncio, time, json, sqlite3, tempfile, math
@@ -32,20 +32,20 @@ SYMBOL_MAP = {
     "R_75":    "R_75",
     "R_100":   "R_100",
 }
-# Backtest constants
-WARM_BARS        = 200
-COOLDOWN_BARS    = 12
-STEP             = 2
-MAX_TRADE_BARS   = 300
 GRAN = {"M5": 300, "M15": 900, "H1": 3600, "H4": 14400}
-COOLDOWN_SEC = 7200          # 2h between signals per symbol
+COOLDOWN_SEC = 7200
 RR           = 2.0
 DB_PATH      = os.environ.get("DB_PATH", "signals.db")
+
+# Backtest constants
+WARM_BARS      = 200
+COOLDOWN_BARS  = 12
+STEP           = 2
+MAX_TRADE_BARS = 300
 
 def to_deriv(s): return SYMBOL_MAP.get(s, s)
 def fmt_price(sym, p):
     return f"{p:.2f}" if "R_" in sym else f"{p:.5f}"
-
 def get_active_symbols():
     now = datetime.now(timezone.utc)
     return WEEKEND_SYMBOLS if now.weekday() >= 5 else WEEKDAY_SYMBOLS
@@ -72,35 +72,29 @@ async def _ws_fetch(symbol, gran, count, end="latest"):
         return json.loads(resp)
 
 async def fetch_candles(symbol, gran=300, count=200, use_cache=True):
-    key = (symbol, gran)
-    now = time.time()
+    key = (symbol, gran); now = time.time()
     if use_cache:
         with _cache_lock:
             if key in _cache:
                 df, ts = _cache[key]
-                if now - ts < CACHE_TTL:
-                    return df
+                if now - ts < CACHE_TTL: return df
     try:
         data = await _ws_fetch(symbol, gran, count)
         if "candles" not in data: return None
         df = pd.DataFrame(data["candles"])
-        for c in ("open", "high", "low", "close"):
-            df[c] = df[c].astype(float)
+        for c in ("open","high","low","close"): df[c] = df[c].astype(float)
         df["epoch"] = pd.to_datetime(df["epoch"], unit="s", utc=True)
-        with _cache_lock:
-            _cache[key] = (df, now)
+        with _cache_lock: _cache[key] = (df, now)
         return df
     except Exception as e:
-        print(f"fetch {symbol} {gran}: {e}")
-        return None
+        print(f"fetch {symbol} {gran}: {e}"); return None
 
 async def fetch_data(symbol, tf="M5", count=200):
     return await fetch_candles(to_deriv(symbol), GRAN[tf], count)
 
 async def fetch_price(symbol):
     df = await fetch_candles(to_deriv(symbol), 60, 2, use_cache=False)
-    if df is not None and len(df):
-        return float(df["close"].iloc[-1])
+    if df is not None and len(df): return float(df["close"].iloc[-1])
     return None
 
 # ============================== UTIL ==============================
@@ -116,34 +110,25 @@ def htf_bias(df):
     if p < ema21 < ema50: return "BEAR"
     return "NEUTRAL"
 
-# ============================== PATTERN DETECTION ==============================
+# ============================== PATTERN ==============================
 def detect_pattern(df):
-    """Fixed: MorningStar middle-candle check compares against current body."""
     if df is None or len(df) < 4: return None
     last, prev = df.iloc[-1], df.iloc[-2]
     body = abs(last["close"] - last["open"]) or 1e-9
     uw = last["high"] - max(last["open"], last["close"])
     lw = min(last["open"], last["close"]) - last["low"]
-
-    # PinBar
     if lw > body * 2 and last["close"] > last["open"]:
         return {"pattern": "PinBar BULL", "bias": "BULL"}
     if uw > body * 2 and last["close"] < last["open"]:
         return {"pattern": "PinBar BEAR", "bias": "BEAR"}
-
-    # Engulfing
     if (last["close"] > last["open"] and prev["close"] < prev["open"]
         and last["close"] > prev["open"] and last["open"] < prev["close"]):
         return {"pattern": "Engulfing BULL", "bias": "BULL"}
     if (last["close"] < last["open"] and prev["close"] > prev["open"]
         and last["open"] > prev["close"] and last["close"] < prev["open"]):
         return {"pattern": "Engulfing BEAR", "bias": "BEAR"}
-
-    # Inside Bar
     if last["high"] < prev["high"] and last["low"] > prev["low"]:
         return {"pattern": "InsideBar", "bias": "NEUTRAL"}
-
-    # Morning / Evening Star
     if len(df) >= 3:
         p2, mid = df.iloc[-3], df.iloc[-2]
         mid_body = abs(mid["close"] - mid["open"])
@@ -153,10 +138,9 @@ def detect_pattern(df):
         if (p2["close"] > p2["open"] and mid_body < body * 0.6
             and last["close"] < last["open"] and last["close"] < p2["open"]):
             return {"pattern": "EveningStar", "bias": "BEAR"}
-
     return None
 
-# ============================== SUPPLY / DEMAND ==============================
+# ============================== S/D ZONES ==============================
 def find_pivots(df, left=2, right=2):
     h, l = df["high"].values, df["low"].values
     piv = []
@@ -168,41 +152,30 @@ def find_pivots(df, left=2, right=2):
 def detect_zones(df, lookback=120, impulse_atr=1.5):
     df = df.reset_index(drop=True)
     a = (df["high"] - df["low"]).rolling(14).mean()
-    zones = []
-    n = len(df)
-    start = max(20, n - lookback)
-
+    zones = []; n = len(df); start = max(20, n - lookback)
     for i in range(start, n - 3):
         if pd.isna(a.iloc[i]) or a.iloc[i] == 0: continue
         body = abs(df["close"].iloc[i] - df["open"].iloc[i])
         if body < a.iloc[i] * impulse_atr: continue
-
         base = df.iloc[max(0, i-3):i]
         if len(base) < 1: continue
         bt, bb = base["high"].max(), base["low"].min()
         if (bt - bb) > a.iloc[i] * 1.5: continue
-
         bull = df["close"].iloc[i] > df["open"].iloc[i]
         pre = df.iloc[max(0, i-6):max(0, i-3)]
         pre_bull = len(pre) >= 2 and pre["close"].iloc[-1] > pre["open"].iloc[0]
-
         if bull and not pre_bull:   kind = "DBR"
         elif bull and pre_bull:     kind = "RBR"
         elif not bull and pre_bull: kind = "RBD"
         else:                       kind = "DBD"
-
-        zones.append({
-            "side": "demand" if bull else "supply",
-            "kind": kind, "top": float(bt), "bot": float(bb),
-            "created_idx": int(i), "fresh": True,
-        })
-
+        zones.append({"side": "demand" if bull else "supply", "kind": kind,
+                      "top": float(bt), "bot": float(bb),
+                      "created_idx": int(i), "fresh": True})
     zones.sort(key=lambda z: z["created_idx"], reverse=True)
     keep = []
     for z in zones:
-        if all(z["side"] != k["side"] or
-               z["top"] < k["bot"] or z["bot"] > k["top"] for k in keep):
-            keep.append(z)
+        if all(z["side"] != k["side"] or z["top"] < k["bot"]
+               or z["bot"] > k["top"] for k in keep): keep.append(z)
     return keep
 
 def mark_freshness(zones, df):
@@ -224,7 +197,6 @@ def equal_levels(df, tolerance=0.0008, min_touches=2):
     for i in range(2, len(df) - 2):
         if h[i] == max(h[i-2:i+3]): piv.append(("H", i, h[i]))
         if l[i] == min(l[i-2:i+3]): piv.append(("L", i, l[i]))
-
     pools = []
     for kind in ("H", "L"):
         pts = sorted([p for p in piv if p[0] == kind], key=lambda x: x[2])
@@ -275,41 +247,26 @@ def fit_trendline(pivots, kind="H", min_pts=3):
             "x0": int(xs[0]), "x1": int(xs[-1])}
 
 def tl_value(tl, x): return tl["slope"] * x + tl["intercept"]
-
 def tl_touch(tl, df, idx, tol_atr, a):
-    line = tl_value(tl, idx)
-    p = df["close"].iloc[idx]
-    return abs(p - line) < tol_atr * a
-
+    return abs(df["close"].iloc[idx] - tl_value(tl, idx)) < tol_atr * a
 def tl_break(tl, df, idx):
-    line = tl_value(tl, idx)
-    c = df["close"].iloc[idx]
+    line = tl_value(tl, idx); c = df["close"].iloc[idx]
     return c > line if tl["kind"] == "H" else c < line
 
 # ============================== SHARED SETUP EVALUATOR ==============================
 def evaluate_setup_sync(df, target_bias, atr_val=None, min_bars=60):
-    """
-    Pure synchronous setup evaluator. Used by BOTH live and backtest.
-    df: candles with open/high/low/close, last row = current bar.
-    """
     if df is None or len(df) < min_bars: return None
     df = df.reset_index(drop=True)
-
-    if atr_val is None:
-        atr_val = atr(df)
+    if atr_val is None: atr_val = atr(df)
     if pd.isna(atr_val) or atr_val == 0: return None
-
     pat = detect_pattern(df)
     if not pat or pat["bias"] != target_bias: return None
-
     zones = mark_freshness(detect_zones(df, 120), df)
     side = "demand" if target_bias == "BULL" else "supply"
     price = float(df["close"].iloc[-1])
-    zone = next((z for z in zones
-                 if z["side"] == side and z["fresh"]
+    zone = next((z for z in zones if z["side"] == side and z["fresh"]
                  and price_in_zone(price, z, pad=atr_val * 0.25)), None)
     if not zone: return None
-
     pools = equal_levels(df, 0.0008)
     sweep = None
     for pool in pools:
@@ -317,13 +274,11 @@ def evaluate_setup_sync(df, target_bias, atr_val=None, min_bars=60):
         if sw and sw["bias"] == target_bias and sw["idx"] >= len(df) - 6:
             sweep = sw; break
     if not sweep: return None
-
     piv = find_pivots(df)
     tl_h = fit_trendline(piv, "H", 3)
     tl_l = fit_trendline(piv, "L", 3)
     idx = len(df) - 1
     tl_ok, tl_reason, tl_obj = False, "", None
-
     if target_bias == "BULL":
         if tl_l and tl_touch(tl_l, df, idx, 0.5, atr_val):
             tl_ok, tl_reason, tl_obj = True, "TL_demand", tl_l
@@ -335,24 +290,17 @@ def evaluate_setup_sync(df, target_bias, atr_val=None, min_bars=60):
         elif tl_l and tl_break(tl_l, df, idx):
             tl_ok, tl_reason, tl_obj = True, "TL_break_dn", tl_l
     if not tl_ok: return None
-
     if target_bias == "BULL":
         sl = float(zone["bot"] - atr_val * 0.5)
-        risk = price - sl
-        tp = price + RR * risk
+        risk = price - sl; tp = price + RR * risk
     else:
         sl = float(zone["top"] + atr_val * 0.5)
-        risk = sl - price
-        tp = price - RR * risk
-
+        risk = sl - price; tp = price - RR * risk
     if risk <= 0 or risk > atr_val * 3: return None
-
-    return {
-        "bias": target_bias, "pattern": pat["pattern"],
-        "entry": price, "sl": sl, "tp": tp, "atr": float(atr_val),
-        "zone_kind": zone["kind"], "zone": zone,
-        "sweep": sweep["kind"], "tl": tl_reason, "tl_obj": tl_obj,
-    }
+    return {"bias": target_bias, "pattern": pat["pattern"],
+            "entry": price, "sl": sl, "tp": tp, "atr": float(atr_val),
+            "zone_kind": zone["kind"], "zone": zone,
+            "sweep": sweep["kind"], "tl": tl_reason, "tl_obj": tl_obj}
 
 # ============================== LIVE SETUP ==============================
 last_signal_time = {}
@@ -360,25 +308,20 @@ last_signal_time = {}
 async def evaluate_setup(symbol):
     if time.time() - last_signal_time.get(symbol, 0) < COOLDOWN_SEC:
         return None
-
     m5  = await fetch_data(symbol, "M5")
     m15 = await fetch_data(symbol, "M15")
     h1  = await fetch_data(symbol, "H1")
     h4  = await fetch_data(symbol, "H4")
     if m5 is None or h1 is None or h4 is None: return None
-
     bh1, bh4 = htf_bias(h1), htf_bias(h4)
-
     if bh4 != "NEUTRAL" and bh1 == bh4:
         mode, target = "WITH_TREND", bh4
         candidates = [("M5", m5)]
     elif bh4 != "NEUTRAL" and bh1 != "NEUTRAL" and bh4 != bh1:
-        # H4 dominant, H1 is pullback → trade the dip on lower TF
         mode, target = "COUNTER", bh4
         candidates = [("M5", m5), ("M15", m15)]
     else:
         return None
-
     for tf_name, df in candidates:
         if df is None or len(df) < 60: continue
         r = evaluate_setup_sync(df, target)
@@ -410,9 +353,8 @@ def db_save(s):
             (datetime.now(timezone.utc).isoformat(),
              s["symbol"], s["mode"], s["tf"], s["pattern"], s["bias"],
              s["entry"], s["sl"], s["tp"],
-             s.get("zone_kind", ""), s.get("sweep", ""), s.get("tl", "")))
-        c.commit()
-        return cur.lastrowid
+             s.get("zone_kind",""), s.get("sweep",""), s.get("tl","")))
+        c.commit(); return cur.lastrowid
 
 def db_open():
     with _db_lock, sqlite3.connect(DB_PATH) as c:
@@ -428,31 +370,23 @@ def db_close(sid, status):
 
 def db_stats():
     with _db_lock, sqlite3.connect(DB_PATH) as c:
-        rows = c.execute(
-            "SELECT status, COUNT(*) FROM signals GROUP BY status").fetchall()
+        rows = c.execute("SELECT status, COUNT(*) FROM signals GROUP BY status").fetchall()
         tot = c.execute("SELECT COUNT(*) FROM signals").fetchone()[0]
     return {"total": tot, **dict(rows)}
 
 # ============================== CHART ==============================
 def build_chart(setup):
-    df = setup["df"]
-    tail = 90
+    df = setup["df"]; tail = 90
     df_plot = df.tail(tail).copy()
     offset = len(df) - len(df_plot)
     df_plot = df_plot.set_index("epoch")
-
     title = (f"{setup['symbol']} {setup['bias']} {setup['pattern']} | "
              f"{setup['mode']} {setup['tf']} | "
              f"H1:{setup['bh1']} H4:{setup['bh4']}")
-    fig, axlist = mpf.plot(
-        df_plot, type="candle", style="charles", returnfig=True,
-        figsize=(15, 8), title=title, ylabel="Price", volume=False,
-        warn_too_much_data=1000
-    )
-    ax = axlist[0]
-    n = len(df_plot)
-
-    # Zones (last 6)
+    fig, axlist = mpf.plot(df_plot, type="candle", style="charles",
+                            returnfig=True, figsize=(15, 8), title=title,
+                            ylabel="Price", volume=False, warn_too_much_data=1000)
+    ax = axlist[0]; n = len(df_plot)
     zones = mark_freshness(detect_zones(df, 120), df)
     for z in zones[-6:]:
         x0 = max(0, z["created_idx"] - offset)
@@ -460,45 +394,36 @@ def build_chart(setup):
         width = n - x0
         color = "#00ff88" if z["side"] == "demand" else "#ff4466"
         alpha = 0.22 if z["fresh"] else 0.08
-        ax.add_patch(Rectangle((x0, z["bot"]), width,
-                                z["top"] - z["bot"],
+        ax.add_patch(Rectangle((x0, z["bot"]), width, z["top"]-z["bot"],
                                 facecolor=color, alpha=alpha,
                                 edgecolor=color, linewidth=0.8))
-        ax.text(x0 + 0.3, z["top"],
-                f"{z['kind']}{'*' if z['fresh'] else ''}",
+        ax.text(x0+0.3, z["top"], f"{z['kind']}{'*' if z['fresh'] else ''}",
                 fontsize=7, color=color, va="bottom")
-
-    # Liquidity pools
     pools = equal_levels(df, 0.0008)
     for pool in pools[-6:]:
-        ax.axhline(pool["price"], color="#ffcc00",
-                   linestyle=":", linewidth=0.9, alpha=0.7)
-        ax.text(n * 0.005, pool["price"], "LIQ",
+        ax.axhline(pool["price"], color="#ffcc00", linestyle=":",
+                   linewidth=0.9, alpha=0.7)
+        ax.text(n*0.005, pool["price"], "LIQ",
                 fontsize=7, color="#ffcc00", va="center")
-
-    # Trendline
     if setup.get("tl_obj"):
         tl = setup["tl_obj"]
         xs = np.arange(max(0, tl["x0"] - offset), n)
         ys = tl_value(tl, xs + offset)
-        ax.plot(xs, ys, color="#00aaff", linewidth=1.6,
-                linestyle="--", label=f"TL r²={tl['r2']:.2f}")
+        ax.plot(xs, ys, color="#00aaff", linewidth=1.6, linestyle="--",
+                label=f"TL r²={tl['r2']:.2f}")
         ax.legend(loc="upper left", fontsize=7, framealpha=0.3)
-
-    # Entry / SL / TP
     ax.axhline(setup["entry"], color="white", linewidth=1.2)
     ax.axhline(setup["sl"], color="#ff2222", linewidth=1.4)
     ax.axhline(setup["tp"], color="#22ff22", linewidth=1.4)
-    ax.text(n * 0.995, setup["entry"],
+    ax.text(n*0.995, setup["entry"],
             f" ENTRY {fmt_price(setup['symbol'], setup['entry'])}",
             fontsize=7, color="white", va="bottom", ha="right")
-    ax.text(n * 0.995, setup["sl"],
+    ax.text(n*0.995, setup["sl"],
             f" SL {fmt_price(setup['symbol'], setup['sl'])}",
             fontsize=7, color="#ff2222", va="top", ha="right")
-    ax.text(n * 0.995, setup["tp"],
+    ax.text(n*0.995, setup["tp"],
             f" TP(2R) {fmt_price(setup['symbol'], setup['tp'])}",
             fontsize=7, color="#22ff22", va="bottom", ha="right")
-
     fd, path = tempfile.mkstemp(suffix=".png", prefix="sfx_")
     os.close(fd)
     fig.savefig(path, dpi=110, bbox_inches="tight", facecolor="#0e1117")
@@ -534,6 +459,7 @@ async def download_history(deriv_sym, months=9):
     df = df.drop_duplicates("epoch").reset_index(drop=True)
     return df
 
+
 def _prepare_dataframes(df_m5):
     df = df_m5.copy()
     for c in ("open", "high", "low", "close"):
@@ -552,6 +478,7 @@ def _prepare_dataframes(df_m5):
 
     return df, rs("15min"), rs("1h"), rs("4h")
 
+
 def simulate_trade(df, i, bias, sl, tp, max_bars=MAX_TRADE_BARS):
     for j in range(i + 1, min(i + max_bars, len(df))):
         b = df.iloc[j]
@@ -562,6 +489,7 @@ def simulate_trade(df, i, bias, sl, tp, max_bars=MAX_TRADE_BARS):
             if b["high"] >= sl: return "SL"
             if b["low"]  <= tp: return "TP"
     return "EXPIRED"
+
 
 def _bt_one_symbol(df_m5, df_m15, df_h1, df_h4, symbol):
     df_m5  = df_m5.reset_index(drop=True)
@@ -627,10 +555,6 @@ def _bt_one_symbol(df_m5, df_m15, df_h1, df_h4, symbol):
         })
         last_i = i
 
-    return trades
-
-# ============================== STATS ==============================
-def summarize(trades, symbol, months):
     wins   = sum(1 for t in trades if t["outcome"] == "TP")
     losses = sum(1 for t in trades if t["outcome"] == "SL")
     expd   = sum(1 for t in trades if t["outcome"] == "EXPIRED")
@@ -640,11 +564,11 @@ def summarize(trades, symbol, months):
     pf     = (wins * RR) / max(1, losses)
 
     def _by(key):
-        groups = {}
+        g = {}
         for t in trades:
-            groups.setdefault(t[key], []).append(t)
+            g.setdefault(t[key], []).append(t)
         out = {}
-        for k, ts in groups.items():
+        for k, ts in g.items():
             w = sum(1 for t in ts if t["outcome"] == "TP")
             l = sum(1 for t in ts if t["outcome"] == "SL")
             out[k] = {"n": len(ts), "w": w, "l": l,
@@ -652,67 +576,54 @@ def summarize(trades, symbol, months):
         return out
 
     return {
-        "symbol": symbol, "months": months,
-        "trades": len(trades),
+        "symbol": symbol, "trades": len(trades),
         "wins": wins, "losses": losses, "expired": expd,
         "wr": wr, "expectancy": expct, "pf": pf,
-        "by_mode": _by("mode"),
-        "by_tf":   _by("tf"),
+        "by_mode":    _by("mode"),
+        "by_tf":      _by("tf"),
         "by_pattern": _by("pattern"),
     }
 
-def print_result(r):
-    print()
-    print(f"════════════════════════════════════════")
-    print(f"  {r['symbol']}  ({r['months']} months M5)")
-    print(f"════════════════════════════════════════")
-    print(f"  Trades:      {r['trades']}")
-    print(f"  Wins:        {r['wins']}")
-    print(f"  Losses:      {r['losses']}")
-    print(f"  Expired:     {r['expired']}")
-    print(f"  Win rate:    {r['wr']:.1f}%")
-    print(f"  Expectancy:  {r['expectancy']:+.2f}R")
-    print(f"  Profit factor: {r['pf']:.2f}")
 
-    if r["by_mode"]:
-        print(f"  ── By mode ──")
-        for k, v in r["by_mode"].items():
-            print(f"    {k:12s}  {v['n']:4d} trades  WR {v['wr']:5.1f}%  "
-                  f"(W {v['w']} / L {v['l']})")
-    if r["by_tf"]:
-        print(f"  ── By timeframe ──")
-        for k, v in r["by_tf"].items():
-            print(f"    {k:12s}  {v['n']:4d} trades  WR {v['wr']:5.1f}%  "
-                  f"(W {v['w']} / L {v['l']})")
-    if r["by_pattern"]:
-        print(f"  ── By pattern ──")
-        for k, v in r["by_pattern"].items():
-            print(f"    {k:16s}  {v['n']:4d} trades  WR {v['wr']:5.1f}%  "
-                  f"(W {v['w']} / L {v['l']})")
+async def run_backtest(symbols, months=9, progress_cb=None):
+    results = []
+    for sym in symbols:
+        if progress_cb:
+            await progress_cb(f"📥 Downloading {months}mo M5 history for {sym}…")
+        df_m5 = await download_history(to_deriv(sym), months)
+        if df_m5 is None or len(df_m5) < 500:
+            results.append({"symbol": sym, "error": "no data"})
+            continue
 
-    verdict = ("✅ EDGE — worth deploying live"
-               if r["expectancy"] > 0.20
-               else "⚠️  WEAK — needs tuning"
-               if r["expectancy"] > 0
-               else "❌ NO EDGE — do not deploy")
-    print(f"  Verdict:     {verdict}")
+        if progress_cb:
+            await progress_cb(f"⚙️ Resampling + backtesting {sym} "
+                              f"({len(df_m5)} M5 bars)…")
 
-# ============================== RUNNER ==============================
-async def run_one(symbol, months):
-    print(f"\n📥 Downloading {months}mo M5 for {symbol}…")
-    t0 = time.time()
-    df_m5 = await download_history(to_deriv(symbol), months)
-    if df_m5 is None or len(df_m5) < 500:
-        print(f"❌ {symbol}: no data")
-        return None
-    print(f"   got {len(df_m5)} bars in {time.time()-t0:.1f}s")
+        df5, df15, dfh1, dfh4 = await asyncio.to_thread(
+            _prepare_dataframes, df_m5)
+        r = await asyncio.to_thread(
+            _bt_one_symbol, df5, df15, dfh1, dfh4, sym)
+        results.append(r)
+    return results
 
-    print(f"⚙️  Resampling + backtesting…")
-    t0 = time.time()
-    df5, df15, dfh1, dfh4 = _prepare_dataframes(df_m5)
-    trades = _bt_one_symbol(df5, df15, dfh1, dfh4, symbol)
-    print(f"   done in {time.time()-t0:.1f}s")
-    return summarize(trades, symbol, months)
+
+# ============================== TRACKER ==============================
+async def tracker_loop():
+    while True:
+        try:
+            for s in db_open():
+                p = await fetch_price(s["symbol"])
+                if p is None: continue
+                if s["bias"] == "BULL":
+                    if p <= s["sl"]: db_close(s["id"], "SL")
+                    elif p >= s["tp"]: db_close(s["id"], "TP")
+                else:
+                    if p >= s["sl"]: db_close(s["id"], "SL")
+                    elif p <= s["tp"]: db_close(s["id"], "TP")
+        except Exception as e:
+            print("tracker:", e)
+        await asyncio.sleep(60)
+
 
 # ============================== TELEGRAM HANDLERS ==============================
 async def start_cmd(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -725,12 +636,14 @@ async def start_cmd(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/backtest [symbol|all] [months=9]"
     )
 
+
 async def price_cmd(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
     lines = ["💰 Live:"]
     for sym in get_active_symbols():
         p = await fetch_price(sym)
         lines.append(f"{sym}: {fmt_price(sym, p) if p else 'feed lag'}")
     await upd.message.reply_text("\n".join(lines))
+
 
 async def signal_cmd(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await upd.message.reply_text("🔍 Scanning zones / liquidity / trendlines…")
@@ -775,6 +688,7 @@ async def signal_cmd(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
                  "liquidity sweep + trendline).\n"
                  "Try /price to confirm feed is live.")
 
+
 async def report_cmd(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
     s = db_stats()
     wins = s.get("TP", 0); losses = s.get("SL", 0)
@@ -792,6 +706,7 @@ async def report_cmd(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"Expectancy: {expct:+.2f}R\n"
         f"Profit factor: {pf:.2f}"
     )
+
 
 async def backtest_cmd(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
     args = list(ctx.args or [])
@@ -818,7 +733,8 @@ async def backtest_cmd(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
     async def progress_cb(msg):
         try:
             await ctx.bot.send_message(chat_id=chat_id, text=msg)
-        except: pass
+        except:
+            pass
 
     try:
         results = await run_backtest(syms, months=months,
@@ -833,7 +749,10 @@ async def backtest_cmd(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if "error" in r:
             lines.append(f"{r['symbol']}: ❌ {r['error']}")
             continue
-        wt, ct = r["with_trend"], r["counter"]
+        wt  = r["by_mode"].get("WITH_TREND", {"n": 0, "wr": 0})
+        ct  = r["by_mode"].get("COUNTER",    {"n": 0, "wr": 0})
+        m5s = r["by_tf"].get("M5",           {"n": 0, "wr": 0})
+        m15 = r["by_tf"].get("M15",          {"n": 0, "wr": 0})
         lines.append(
             f"── {r['symbol']} ──\n"
             f"Trades: {r['trades']}  (W {r['wins']} / L {r['losses']} / "
@@ -841,7 +760,9 @@ async def backtest_cmd(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"Win rate: {r['wr']:.1f}%\n"
             f"Expectancy: {r['expectancy']:+.2f}R  |  PF: {r['pf']:.2f}\n"
             f"  ▸ With-trend: {wt['n']} trades, WR {wt['wr']:.1f}%\n"
-            f"  ▸ Counter:    {ct['n']} trades, WR {ct['wr']:.1f}%"
+            f"  ▸ Counter:    {ct['n']} trades, WR {ct['wr']:.1f}%\n"
+            f"  ▸ M5 setups:  {m5s['n']} trades, WR {m5s['wr']:.1f}%\n"
+            f"  ▸ M15 setups: {m15['n']} trades, WR {m15['wr']:.1f}%"
         )
     lines.append("\nRule: only deploy live if Expectancy > +0.20R.")
 
@@ -849,13 +770,16 @@ async def backtest_cmd(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
     for chunk in [txt[i:i + 3800] for i in range(0, len(txt), 3800)]:
         await ctx.bot.send_message(chat_id=chat_id, text=chunk)
 
+
 async def error_handler(upd, ctx):
     print("PTB error:", ctx.error)
+
 
 # ============================== MAIN ==============================
 async def post_init(app):
     db_init()
     asyncio.create_task(tracker_loop())
+
 
 def main():
     if not TELEGRAM_TOKEN:
@@ -872,6 +796,7 @@ def main():
     app.add_error_handler(error_handler)
     print("StarFX V15.1 running…")
     app.run_polling()
+
 
 if __name__ == "__main__":
     main()
