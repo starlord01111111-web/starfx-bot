@@ -270,7 +270,6 @@ def evaluate_setup_sync(df, target_bias, atr_val=None, min_bars=60):
 
     pat = detect_pattern(df)
     if not pat: return None
-    # Allow NEUTRAL patterns (InsideBar) to borrow HTF bias
     if pat["bias"] != target_bias and pat["bias"] != "NEUTRAL":
         return None
 
@@ -281,7 +280,6 @@ def evaluate_setup_sync(df, target_bias, atr_val=None, min_bars=60):
                  and price_interacts_zone(df, z, side, 6, atr_val * 0.35)), None)
     if not zone: return None
 
-    # Bonuses (optional)
     pools = equal_levels(df, 0.0025)
     sweep = None
     for pool in pools:
@@ -305,17 +303,17 @@ def evaluate_setup_sync(df, target_bias, atr_val=None, min_bars=60):
         elif tl_l and tl_break(tl_l, df, idx):
             tl_ok, tl_reason, tl_obj = True, "TL_break_dn", tl_l
 
-    # NO requirement — bonuses are just metadata
     last_candle = df.iloc[-1]
-if target_bias == "BULL":
-    sl = float(last_candle["low"] - atr_val * 0.3)
-    risk = price - sl
-    tp = price + RR * risk
-else:
-    sl = float(last_candle["high"] + atr_val * 0.3)
-    risk = sl - price
-    tp = price - RR * risk
-if risk <= 0 or risk > atr_val * 2: return None
+    if target_bias == "BULL":
+        sl = float(last_candle["low"] - atr_val * 0.3)
+        risk = price - sl
+        tp = price + RR * risk
+    else:
+        sl = float(last_candle["high"] + atr_val * 0.3)
+        risk = sl - price
+        tp = price - RR * risk
+    if risk <= 0 or risk > atr_val * 2: return None
+
     return {"bias": target_bias, "pattern": pat["pattern"],
             "entry": price, "sl": sl, "tp": tp, "atr": float(atr_val),
             "zone_kind": zone["kind"],
