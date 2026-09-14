@@ -306,14 +306,16 @@ def evaluate_setup_sync(df, target_bias, atr_val=None, min_bars=60):
             tl_ok, tl_reason, tl_obj = True, "TL_break_dn", tl_l
 
     # NO requirement — bonuses are just metadata
-    if target_bias == "BULL":
-        sl = float(zone["bot"] - atr_val * 0.5); risk = price - sl
-        tp = price + RR * risk
-    else:
-        sl = float(zone["top"] + atr_val * 0.5); risk = sl - price
-        tp = price - RR * risk
-    if risk <= 0 or risk > atr_val * 5: return None
-
+    last_candle = df.iloc[-1]
+if target_bias == "BULL":
+    sl = float(last_candle["low"] - atr_val * 0.3)
+    risk = price - sl
+    tp = price + RR * risk
+else:
+    sl = float(last_candle["high"] + atr_val * 0.3)
+    risk = sl - price
+    tp = price - RR * risk
+if risk <= 0 or risk > atr_val * 2: return None
     return {"bias": target_bias, "pattern": pat["pattern"],
             "entry": price, "sl": sl, "tp": tp, "atr": float(atr_val),
             "zone_kind": zone["kind"],
@@ -638,11 +640,14 @@ def _diag_one_symbol(df_m5, df_m15, df_h1, df_h4, symbol):
             elif tl_l and tl_break(tl_l, w, idx): tl_ok = True
         if tl_ok: c["trendline"] += 1
 
-        if target == "BULL":
-            sl = float(zone["bot"] - av5*0.5); risk = w["close"].iloc[-1] - sl
-        else:
-            sl = float(zone["top"] + av5*0.5); risk = sl - w["close"].iloc[-1]
-        if risk <= 0 or risk > av5 * 5: continue
+        last_candle = w.iloc[-1]
+if target == "BULL":
+    sl = float(last_candle["low"] - av5*0.3)
+    risk = w["close"].iloc[-1] - sl
+else:
+    sl = float(last_candle["high"] + av5*0.3)
+    risk = sl - w["close"].iloc[-1]
+if risk <= 0 or risk > av5 * 2: continue
         c["trade"] += 1
     return {"symbol": symbol, **c}
 
