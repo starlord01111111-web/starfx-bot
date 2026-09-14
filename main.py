@@ -1,9 +1,8 @@
 """
-StarFX V15.1 — full bot in one file
-Set env vars on Render: TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, DERIV_APP_ID
+StarFX V15.2 — complete bot
+Env vars: TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, DERIV_APP_ID
 """
-
-import os, asyncio, time, json, sqlite3, tempfile, math
+import os, asyncio, time, json, sqlite3, tempfile
 from datetime import datetime, timezone
 from threading import Thread, Lock
 import numpy as np
@@ -20,7 +19,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 
 # ============================== CONFIG ==============================
 TELEGRAM_TOKEN   = "8656945768:AAHSMvpSoWcJgV29WEUl14Z8Vhc10X0W11A"
-TELEGRAM_CHAT_ID = "-1004365660319"
+TELEGRAM_CHAT_ID = ""-1004365660319"
 DERIV_APP_ID     = os.environ.get("DERIV_APP_ID", "1089")
 
 WEEKDAY_SYMBOLS = ["XAU/USD", "GBP/USD", "R_75"]
@@ -33,61 +32,64 @@ SYMBOL_MAP = {
     "R_100":   "R_100",
 }
 GRAN = {"M5": 300, "M15": 900, "H1": 3600, "H4": 14400}
-COOLDOWN_SEC = 7200
-RR           = 2.0
-DB_PATH      = os.environ.get("DB_PATH", "signals.db")
 
-# Backtest constants
+COOLDOWN_SEC   = 7200
+RR             = 2.0
+DB_PATH        = os.environ.get("DB_PATH", "signals.db")
 WARM_BARS      = 200
 COOLDOWN_BARS  = 12
 STEP           = 2
 MAX_TRADE_BARS = 300
+DL_TIMEOUT     = 20
+DL_BATCH       = 2000
 
 def to_deriv(s): return SYMBOL_MAP.get(s, s)
-def fmt_price(sym, p):
-    return f"{p:.2f}" if "R_" in sym else f"{p:.5f}"
+def fmt_price(sym, p): return f"{p:.2f}" if "R_" in sym else f"{p:.5f}"
 def get_active_symbols():
-    now = datetime.now(timezone.utc)
-    return WEEKEND_SYMBOLS if now.weekday() >= 5 else WEEKDAY_SYMBOLS
+    return WEEKEND_SYMBOLS if datetime.now(timezone.utc).weekday() >= 5 else WEEKDAY_SYMBOLS
 
-# ============================== FLASK KEEPALIVE ==============================
+# ============================== FLASK ==============================
 _flask = Flask("starfx")
 @_flask.route("/")
-def _home(): return "StarFX V15.1 alive"
+def _home(): return "StarFX V15.2 alive"
 def _run_flask():
     _flask.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
 Thread(target=_run_flask, daemon=True).start()
 
-# ============================== DATA LAYER ==============================
+# ============================== DATA ==============================
 _cache, _cache_lock = {}, Lock()
 CACHE_TTL = 55
 
 async def _ws_fetch(symbol, gran, count, end="latest"):
     uri = f"wss://ws.derivws.com/websockets/v3?app_id={DERIV_APP_ID}"
-    async with websockets.connect(uri, ping_interval=20) as ws:
+    async with websockets.connect(uri, ping_interval=20, close_timeout=5) as ws:
         req = {"ticks_history": symbol, "count": count, "end": end,
                "style": "candles", "granularity": gran}
         await ws.send(json.dumps(req))
-        resp = await asyncio.wait_for(ws.recv(), timeout=25)
+        resp = await asyncio.wait_for(ws.recv(), timeout=DL_TIMEOUT)
         return json.loads(resp)
 
 async def fetch_candles(symbol, gran=300, count=200, use_cache=True):
-    key = (symbol, gran); now = time.time()
+    key = (symbol, gran)
+    now = time.time()
     if use_cache:
         with _cache_lock:
             if key in _cache:
                 df, ts = _cache[key]
                 if now - ts < CACHE_TTL: return df
-    try:
-        data = await _ws_fetch(symbol, gran, count)
-        if "candles" not in data: return None
-        df = pd.DataFrame(data["candles"])
-        for c in ("open","high","low","close"): df[c] = df[c].astype(float)
-        df["epoch"] = pd.to_datetime(df["epoch"], unit="s", utc=True)
-        with _cache_lock: _cache[key] = (df, now)
-        return df
-    except Exception as e:
-        print(f"fetch {symbol} {gran}: {e}"); return None
+    for attempt in range(3):
+        try:
+            data = await _ws_fetch(symbol, gran, count)
+            if "candles" not in data: return None
+            df = pd.DataFrame(data["candles"])
+            for c in ("open","high","low","close"): df[c] = df[c].astype(float)
+            df["epoch"] = pd.to_datetime(df["epoch"], unit="s", utc=True)
+            with _cache_lock: _cache[key] = (df, now)
+            return df
+        except Exception as e:
+            print(f"fetch {symbol} {gran} attempt {attempt+1}: {e}")
+            await asyncio.sleep(1)
+    return None
 
 async def fetch_data(symbol, tf="M5", count=200):
     return await fetch_candles(to_deriv(symbol), GRAN[tf], count)
@@ -99,7 +101,8 @@ async def fetch_price(symbol):
 
 # ============================== UTIL ==============================
 def atr(df, n=14):
-    return (df["high"] - df["low"]).rolling(n).mean().iloc[-1]
+    v = (df["high"] - df["low"]).rolling(n).mean().iloc[-1]
+    return v if not pd.isna(v) else (df["high"] - df["low"]).mean()
 
 def htf_bias(df):
     if df is None or len(df) < 50: return "NEUTRAL"
@@ -131,16 +134,16 @@ def detect_pattern(df):
         return {"pattern": "InsideBar", "bias": "NEUTRAL"}
     if len(df) >= 3:
         p2, mid = df.iloc[-3], df.iloc[-2]
-        mid_body = abs(mid["close"] - mid["open"])
-        if (p2["close"] < p2["open"] and mid_body < body * 0.6
+        mb = abs(mid["close"] - mid["open"])
+        if (p2["close"] < p2["open"] and mb < body * 0.6
             and last["close"] > last["open"] and last["close"] > p2["open"]):
             return {"pattern": "MorningStar", "bias": "BULL"}
-        if (p2["close"] > p2["open"] and mid_body < body * 0.6
+        if (p2["close"] > p2["open"] and mb < body * 0.6
             and last["close"] < last["open"] and last["close"] < p2["open"]):
             return {"pattern": "EveningStar", "bias": "BEAR"}
     return None
 
-# ============================== S/D ZONES ==============================
+# ============================== ZONES ==============================
 def find_pivots(df, left=2, right=2):
     h, l = df["high"].values, df["low"].values
     piv = []
@@ -152,7 +155,8 @@ def find_pivots(df, left=2, right=2):
 def detect_zones(df, lookback=120, impulse_atr=1.5):
     df = df.reset_index(drop=True)
     a = (df["high"] - df["low"]).rolling(14).mean()
-    zones = []; n = len(df); start = max(20, n - lookback)
+    zones, n = [], len(df)
+    start = max(20, n - lookback)
     for i in range(start, n - 3):
         if pd.isna(a.iloc[i]) or a.iloc[i] == 0: continue
         body = abs(df["close"].iloc[i] - df["open"].iloc[i])
@@ -179,16 +183,12 @@ def detect_zones(df, lookback=120, impulse_atr=1.5):
     return keep
 
 def mark_freshness(zones, df):
-    """A zone is fresh unless price CLOSED through it (not just wicks)."""
     last_idx = len(df) - 1
-    a = (df["high"] - df["low"]).rolling(14).mean().iloc[-1]
-    if pd.isna(a) or a == 0:
-        a = (df["high"] - df["low"]).mean()
+    a = atr(df)
     for z in zones:
         after = df.iloc[z["created_idx"] + 1 : last_idx]
         if len(after) == 0:
-            z["fresh"] = True
-            continue
+            z["fresh"] = True; continue
         if z["side"] == "demand":
             broken = (after["close"] < z["bot"] - a * 0.3).any()
         else:
@@ -197,11 +197,10 @@ def mark_freshness(zones, df):
     return zones
 
 def price_interacts_zone(df, zone, side, lookback=3, pad=0.0):
-    """Was the zone touched (wick or close) in the last `lookback` bars?"""
     recent = df.iloc[-lookback:]
-    top = zone["top"] + pad
-    bot = zone["bot"] - pad
+    top, bot = zone["top"] + pad, zone["bot"] - pad
     return bool(((recent["low"] <= top) & (recent["high"] >= bot)).any())
+
 # ============================== LIQUIDITY ==============================
 def equal_levels(df, tolerance=0.0008, min_touches=2):
     h, l = df["high"].values, df["low"].values
@@ -226,22 +225,20 @@ def equal_levels(df, tolerance=0.0008, min_touches=2):
                               "idx": [c[1] for c in cl]})
     return pools
 
-def detect_sweep(df, pool, lookahead=5):
+def detect_sweep(df, pool, lookahead=8):
     last = max(pool["idx"])
     if last >= len(df) - 1: return None
     level = pool["price"]
     scan = df.iloc[last + 1: last + 1 + lookahead]
     for i, row in scan.iterrows():
         if pool["kind"] == "H" and row["high"] > level and row["close"] < level:
-            return {"kind": "sweep_high", "level": level,
-                    "idx": int(i), "bias": "BEAR"}
+            return {"kind": "sweep_high", "level": level, "idx": int(i), "bias": "BEAR"}
         if pool["kind"] == "L" and row["low"] < level and row["close"] > level:
-            return {"kind": "sweep_low", "level": level,
-                    "idx": int(i), "bias": "BULL"}
+            return {"kind": "sweep_low", "level": level, "idx": int(i), "bias": "BULL"}
     return None
 
 # ============================== TRENDLINES ==============================
-def fit_trendline(pivots, kind="H", min_pts=3):
+def fit_trendline(pivots, kind="H", min_pts=2):
     pts = [(i, p) for (i, p, k) in pivots if k == kind]
     if len(pts) < min_pts: return None
     pts = pts[-min_pts:]
@@ -253,10 +250,9 @@ def fit_trendline(pivots, kind="H", min_pts=3):
     ss_res = ((ys - pred) ** 2).sum()
     ss_tot = ((ys - ys.mean()) ** 2).sum() or 1e-9
     r2 = 1 - ss_res / ss_tot
-    if r2 < 0.6: return None
+    if r2 < 0.5: return None
     return {"slope": float(slope), "intercept": float(inter),
-            "r2": float(r2), "kind": kind,
-            "x0": int(xs[0]), "x1": int(xs[-1])}
+            "r2": float(r2), "kind": kind, "x0": int(xs[0]), "x1": int(xs[-1])}
 
 def tl_value(tl, x): return tl["slope"] * x + tl["intercept"]
 def tl_touch(tl, df, idx, tol_atr, a):
@@ -265,62 +261,66 @@ def tl_break(tl, df, idx):
     line = tl_value(tl, idx); c = df["close"].iloc[idx]
     return c > line if tl["kind"] == "H" else c < line
 
-# ============================== SHARED SETUP EVALUATOR ==============================
+# ============================== SETUP EVAL ==============================
 def evaluate_setup_sync(df, target_bias, atr_val=None, min_bars=60):
     if df is None or len(df) < min_bars: return None
     df = df.reset_index(drop=True)
     if atr_val is None: atr_val = atr(df)
     if pd.isna(atr_val) or atr_val == 0: return None
+
     pat = detect_pattern(df)
     if not pat or pat["bias"] != target_bias: return None
+
     zones = mark_freshness(detect_zones(df, 120), df)
     side = "demand" if target_bias == "BULL" else "supply"
     price = float(df["close"].iloc[-1])
     zone = next((z for z in zones if z["side"] == side and z["fresh"]
-             and price_interacts_zone(df, z, side, lookback=3,
-                                       pad=atr_val * 0.25)), None)
+                 and price_interacts_zone(df, z, side, 3, atr_val * 0.25)), None)
     if not zone: return None
+
     pools = equal_levels(df, 0.0008)
     sweep = None
     for pool in pools:
-        sw = detect_sweep(df, pool, 5)
-        if sw and sw["bias"] == target_bias and sw["idx"] >= len(df) - 6:
+        sw = detect_sweep(df, pool, 8)
+        if sw and sw["bias"] == target_bias and sw["idx"] >= len(df) - 8:
             sweep = sw; break
     if not sweep: return None
+
     piv = find_pivots(df)
-    tl_h = fit_trendline(piv, "H", 3)
-    tl_l = fit_trendline(piv, "L", 3)
+    tl_h = fit_trendline(piv, "H", 2)
+    tl_l = fit_trendline(piv, "L", 2)
     idx = len(df) - 1
     tl_ok, tl_reason, tl_obj = False, "", None
     if target_bias == "BULL":
-        if tl_l and tl_touch(tl_l, df, idx, 0.5, atr_val):
+        if tl_l and tl_touch(tl_l, df, idx, 0.6, atr_val):
             tl_ok, tl_reason, tl_obj = True, "TL_demand", tl_l
         elif tl_h and tl_break(tl_h, df, idx):
             tl_ok, tl_reason, tl_obj = True, "TL_break_up", tl_h
     else:
-        if tl_h and tl_touch(tl_h, df, idx, 0.5, atr_val):
+        if tl_h and tl_touch(tl_h, df, idx, 0.6, atr_val):
             tl_ok, tl_reason, tl_obj = True, "TL_supply", tl_h
         elif tl_l and tl_break(tl_l, df, idx):
             tl_ok, tl_reason, tl_obj = True, "TL_break_dn", tl_l
     if not tl_ok: return None
+
     if target_bias == "BULL":
-        sl = float(zone["bot"] - atr_val * 0.5)
-        risk = price - sl; tp = price + RR * risk
+        sl = float(zone["bot"] - atr_val * 0.5); risk = price - sl
+        tp = price + RR * risk
     else:
-        sl = float(zone["top"] + atr_val * 0.5)
-        risk = sl - price; tp = price - RR * risk
-    if risk <= 0 or risk > atr_val * 3: return None
+        sl = float(zone["top"] + atr_val * 0.5); risk = sl - price
+        tp = price - RR * risk
+    if risk <= 0 or risk > atr_val * 4: return None
+
     return {"bias": target_bias, "pattern": pat["pattern"],
             "entry": price, "sl": sl, "tp": tp, "atr": float(atr_val),
-            "zone_kind": zone["kind"], "zone": zone,
-            "sweep": sweep["kind"], "tl": tl_reason, "tl_obj": tl_obj}
+            "zone_kind": zone["kind"], "sweep": sweep["kind"],
+            "tl": tl_reason, "tl_obj": tl_obj}
 
-# ============================== LIVE SETUP ==============================
+# ============================== LIVE ==============================
 last_signal_time = {}
 
 async def evaluate_setup(symbol):
-    if time.time() - last_signal_time.get(symbol, 0) < COOLDOWN_SEC:
-        return None
+    if time.time() - last_signal_time.get(symbol, 0) < COOLDOWN_SEC: return None
     m5  = await fetch_data(symbol, "M5")
     m15 = await fetch_data(symbol, "M15")
     h1  = await fetch_data(symbol, "H1")
@@ -329,13 +329,13 @@ async def evaluate_setup(symbol):
     bh1, bh4 = htf_bias(h1), htf_bias(h4)
     if bh4 != "NEUTRAL" and bh1 == bh4:
         mode, target = "WITH_TREND", bh4
-        candidates = [("M5", m5)]
+        cands = [("M5", m5)]
     elif bh4 != "NEUTRAL" and bh1 != "NEUTRAL" and bh4 != bh1:
         mode, target = "COUNTER", bh4
-        candidates = [("M5", m5), ("M15", m15)]
+        cands = [("M5", m5), ("M15", m15)]
     else:
         return None
-    for tf_name, df in candidates:
+    for tf_name, df in cands:
         if df is None or len(df) < 60: continue
         r = evaluate_setup_sync(df, target)
         if r:
@@ -352,8 +352,7 @@ def db_init():
         c.execute("""CREATE TABLE IF NOT EXISTS signals(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             ts TEXT, symbol TEXT, mode TEXT, tf TEXT,
-            pattern TEXT, bias TEXT,
-            entry REAL, sl REAL, tp REAL,
+            pattern TEXT, bias TEXT, entry REAL, sl REAL, tp REAL,
             zone_kind TEXT, sweep TEXT, tl TEXT,
             status TEXT DEFAULT 'OPEN', closed_ts TEXT)""")
         c.commit()
@@ -389,35 +388,32 @@ def db_stats():
 
 # ============================== CHART ==============================
 def build_chart(setup):
-    df = setup["df"]; tail = 90
-    df_plot = df.tail(tail).copy()
+    df = setup["df"]
+    df_plot = df.tail(90).copy()
     offset = len(df) - len(df_plot)
     df_plot = df_plot.set_index("epoch")
     title = (f"{setup['symbol']} {setup['bias']} {setup['pattern']} | "
-             f"{setup['mode']} {setup['tf']} | "
-             f"H1:{setup['bh1']} H4:{setup['bh4']}")
+             f"{setup['mode']} {setup['tf']} | H1:{setup['bh1']} H4:{setup['bh4']}")
     fig, axlist = mpf.plot(df_plot, type="candle", style="charles",
                             returnfig=True, figsize=(15, 8), title=title,
-                            ylabel="Price", volume=False, warn_too_much_data=1000)
+                            ylabel="Price", volume=False)
     ax = axlist[0]; n = len(df_plot)
     zones = mark_freshness(detect_zones(df, 120), df)
     for z in zones[-6:]:
         x0 = max(0, z["created_idx"] - offset)
         if x0 >= n: continue
-        width = n - x0
         color = "#00ff88" if z["side"] == "demand" else "#ff4466"
         alpha = 0.22 if z["fresh"] else 0.08
-        ax.add_patch(Rectangle((x0, z["bot"]), width, z["top"]-z["bot"],
+        ax.add_patch(Rectangle((x0, z["bot"]), n - x0, z["top"] - z["bot"],
                                 facecolor=color, alpha=alpha,
                                 edgecolor=color, linewidth=0.8))
         ax.text(x0+0.3, z["top"], f"{z['kind']}{'*' if z['fresh'] else ''}",
                 fontsize=7, color=color, va="bottom")
-    pools = equal_levels(df, 0.0008)
-    for pool in pools[-6:]:
+    for pool in equal_levels(df, 0.0008)[-6:]:
         ax.axhline(pool["price"], color="#ffcc00", linestyle=":",
                    linewidth=0.9, alpha=0.7)
-        ax.text(n*0.005, pool["price"], "LIQ",
-                fontsize=7, color="#ffcc00", va="center")
+        ax.text(n*0.005, pool["price"], "LIQ", fontsize=7,
+                color="#ffcc00", va="center")
     if setup.get("tl_obj"):
         tl = setup["tl_obj"]
         xs = np.arange(max(0, tl["x0"] - offset), n)
@@ -440,55 +436,50 @@ def build_chart(setup):
     fd, path = tempfile.mkstemp(suffix=".png", prefix="sfx_")
     os.close(fd)
     fig.savefig(path, dpi=110, bbox_inches="tight", facecolor="#0e1117")
-    plt.close(fig)
-    return path
+    plt.close(fig); return path
 
-# ============================== BACKTEST ==============================
-async def download_history(deriv_sym, months=9):     ← START of what to replace
+# ============================== DOWNLOAD ==============================
+async def download_history(deriv_sym, months=9):
     total_needed = months * 30 * 24 * 12 + 500
-    all_c = []
-    end = "latest"
-    while len(all_c) < total_needed:
+    all_c, end, attempts = [], "latest", 0
+    while len(all_c) < total_needed and attempts < 60:
+        attempts += 1
         try:
-            resp = await _ws_fetch(deriv_sym, 300, 5000, end=end)
+            resp = await _ws_fetch(deriv_sym, 300, DL_BATCH, end=end)
+            got = len(resp.get("candles", []))
+            print(f"  [{deriv_sym}] batch {attempts}: {got} bars (total {len(all_c)})")
+        except asyncio.TimeoutError:
+            print(f"  [{deriv_sym}] batch {attempts}: TIMEOUT, retry")
+            await asyncio.sleep(2); continue
         except Exception as e:
-            print(f"dl err {deriv_sym}: {e}")
-            break
-        if "candles" not in resp:
-            break
+            print(f"  [{deriv_sym}] batch {attempts}: err {e}")
+            await asyncio.sleep(2); continue
+        if "candles" not in resp: break
         batch = resp["candles"]
-        if not batch:
-            break
+        if not batch: break
         all_c = batch + all_c
         end = batch[0]["epoch"] - 1
-        if len(batch) < 5000:
-            break
-    if not all_c:
-        return None
+        if len(batch) < DL_BATCH: break
+    if not all_c: return None
     df = pd.DataFrame(all_c)
-    for c in ("open", "high", "low", "close"):
-        df[c] = df[c].astype(float)
+    for c in ("open","high","low","close"): df[c] = df[c].astype(float)
     df["epoch"] = pd.to_datetime(df["epoch"], unit="s", utc=True)
     df = df.drop_duplicates("epoch").reset_index(drop=True)
-    return df                                          ← END of what to replace
+    print(f"  [{deriv_sym}] downloaded {len(df)} bars")
+    return df
 
 
 def _prepare_dataframes(df_m5):
     df = df_m5.copy()
-    for c in ("open", "high", "low", "close"):
-        df[c] = df[c].astype(float)
+    for c in ("open","high","low","close"): df[c] = df[c].astype(float)
     if not pd.api.types.is_datetime64_any_dtype(df["epoch"]):
         df["epoch"] = pd.to_datetime(df["epoch"], unit="s", utc=True)
     df = df.sort_values("epoch").reset_index(drop=True)
-
     idx = df.set_index("epoch")
-
     def rs(rule):
         return (idx.resample(rule)
-                .agg({"open": "first", "high": "max",
-                      "low": "min", "close": "last"})
+                .agg({"open":"first","high":"max","low":"min","close":"last"})
                 .dropna().reset_index())
-
     return df, rs("15min"), rs("1h"), rs("4h")
 
 
@@ -505,261 +496,149 @@ def simulate_trade(df, i, bias, sl, tp, max_bars=MAX_TRADE_BARS):
 
 
 def _bt_one_symbol(df_m5, df_m15, df_h1, df_h4, symbol):
-    df_m5  = df_m5.reset_index(drop=True)
-    df_m15 = df_m15.reset_index(drop=True)
-    df_h1  = df_h1.reset_index(drop=True)
-    df_h4  = df_h4.reset_index(drop=True)
-
+    df_m5 = df_m5.reset_index(drop=True); df_m15 = df_m15.reset_index(drop=True)
+    df_h1 = df_h1.reset_index(drop=True); df_h4 = df_h4.reset_index(drop=True)
     n = len(df_m5)
     a5_full = (df_m5["high"] - df_m5["low"]).rolling(14).mean()
-
-    m5_ep  = df_m5["epoch"].values
-    m15_ep = df_m15["epoch"].values
-    h1_ep  = df_h1["epoch"].values
-    h4_ep  = df_h4["epoch"].values
-
-    trades = []
-    last_i = -999
-
+    m5_ep = df_m5["epoch"].values; m15_ep = df_m15["epoch"].values
+    h1_ep = df_h1["epoch"].values; h4_ep = df_h4["epoch"].values
+    trades, last_i = [], -999
     for i in range(WARM_BARS, n - MAX_TRADE_BARS, STEP):
         if i - last_i < COOLDOWN_BARS: continue
         av5 = a5_full.iloc[i]
         if pd.isna(av5) or av5 == 0: continue
-
         ep = m5_ep[i]
         h1_pos  = np.searchsorted(h1_ep,  ep, side="right") - 1
         h4_pos  = np.searchsorted(h4_ep,  ep, side="right") - 1
         m15_pos = np.searchsorted(m15_ep, ep, side="right") - 1
         if h1_pos < 50 or h4_pos < 50: continue
-
-        bh1 = htf_bias(df_h1.iloc[max(0, h1_pos - 200):h1_pos + 1])
-        bh4 = htf_bias(df_h4.iloc[max(0, h4_pos - 200):h4_pos + 1])
-
+        bh1 = htf_bias(df_h1.iloc[max(0, h1_pos-200):h1_pos+1])
+        bh4 = htf_bias(df_h4.iloc[max(0, h4_pos-200):h4_pos+1])
         if bh4 != "NEUTRAL" and bh1 == bh4:
             mode, target = "WITH_TREND", bh4
-            cands = [("M5", df_m5.iloc[max(0, i - 200):i + 1], av5)]
+            cands = [("M5", df_m5.iloc[max(0, i-200):i+1], av5)]
         elif bh4 != "NEUTRAL" and bh1 != "NEUTRAL" and bh4 != bh1:
             mode, target = "COUNTER", bh4
-            cands = [("M5", df_m5.iloc[max(0, i - 200):i + 1], av5)]
+            cands = [("M5", df_m5.iloc[max(0, i-200):i+1], av5)]
             if m15_pos >= 60:
-                w15 = df_m15.iloc[max(0, m15_pos - 200):m15_pos + 1]
+                w15 = df_m15.iloc[max(0, m15_pos-200):m15_pos+1]
                 av15 = (w15["high"] - w15["low"]).rolling(14).mean().iloc[-1]
                 cands.append(("M15", w15, av15))
-        else:
-            continue
-
+        else: continue
         matched, matched_tf = None, None
         for tf_name, w, av_tf in cands:
             if pd.isna(av_tf) or av_tf == 0: continue
             r = evaluate_setup_sync(w, target, atr_val=av_tf)
-            if r:
-                matched, matched_tf = r, tf_name
-                break
+            if r: matched, matched_tf = r, tf_name; break
         if not matched: continue
-
-        outcome = simulate_trade(df_m5, i, target,
-                                  matched["sl"], matched["tp"])
-        trades.append({
-            "i": i, "time": df_m5["epoch"].iloc[i],
-            "bias": target, "mode": mode, "tf": matched_tf,
-            "pattern": matched["pattern"],
-            "entry": matched["entry"], "sl": matched["sl"],
-            "tp": matched["tp"], "outcome": outcome,
-        })
+        outcome = simulate_trade(df_m5, i, target, matched["sl"], matched["tp"])
+        trades.append({"i": i, "bias": target, "mode": mode,
+                       "tf": matched_tf, "pattern": matched["pattern"],
+                       "outcome": outcome})
         last_i = i
-
-    wins   = sum(1 for t in trades if t["outcome"] == "TP")
+    wins = sum(1 for t in trades if t["outcome"] == "TP")
     losses = sum(1 for t in trades if t["outcome"] == "SL")
-    expd   = sum(1 for t in trades if t["outcome"] == "EXPIRED")
+    expd = sum(1 for t in trades if t["outcome"] == "EXPIRED")
     n_done = wins + losses
-    wr     = wins / n_done * 100 if n_done else 0
-    expct  = (wins * RR - losses) / max(1, len(trades))
-    pf     = (wins * RR) / max(1, losses)
-
+    wr = wins / n_done * 100 if n_done else 0
+    expct = (wins * RR - losses) / max(1, len(trades))
+    pf = (wins * RR) / max(1, losses)
     def _by(key):
         g = {}
-        for t in trades:
-            g.setdefault(t[key], []).append(t)
+        for t in trades: g.setdefault(t[key], []).append(t)
         out = {}
         for k, ts in g.items():
             w = sum(1 for t in ts if t["outcome"] == "TP")
             l = sum(1 for t in ts if t["outcome"] == "SL")
             out[k] = {"n": len(ts), "w": w, "l": l,
-                      "wr": w / (w + l) * 100 if (w + l) else 0}
+                      "wr": w/(w+l)*100 if (w+l) else 0}
         return out
-
-    return {
-        "symbol": symbol, "trades": len(trades),
-        "wins": wins, "losses": losses, "expired": expd,
-        "wr": wr, "expectancy": expct, "pf": pf,
-        "by_mode":    _by("mode"),
-        "by_tf":      _by("tf"),
-        "by_pattern": _by("pattern"),
-    }
+    return {"symbol": symbol, "trades": len(trades), "wins": wins,
+            "losses": losses, "expired": expd, "wr": wr,
+            "expectancy": expct, "pf": pf,
+            "by_mode": _by("mode"), "by_tf": _by("tf")}
 
 
 async def run_backtest(symbols, months=9, progress_cb=None):
     results = []
-    # ============================== DIAG ==============================
-def _diag_one_symbol(df_m5, df_m15, df_h1, df_h4, symbol):
-    df_m5  = df_m5.reset_index(drop=True)
-    df_m15 = df_m15.reset_index(drop=True)
-    df_h1  = df_h1.reset_index(drop=True)
-    df_h4  = df_h4.reset_index(drop=True)
+    for sym in symbols:
+        if progress_cb:
+            await progress_cb(f"📥 Downloading {months}mo M5 for {sym}…")
+        try:
+            df_m5 = await asyncio.wait_for(
+                download_history(to_deriv(sym), months), timeout=300)
+        except asyncio.TimeoutError:
+            results.append({"symbol": sym, "error": "download timed out"})
+            continue
+        if df_m5 is None or len(df_m5) < 500:
+            results.append({"symbol": sym, "error": "no data"}); continue
+        if progress_cb:
+            await progress_cb(f"⚙️ Backtesting {sym} ({len(df_m5)} bars)…")
+        df5, df15, dfh1, dfh4 = await asyncio.to_thread(_prepare_dataframes, df_m5)
+        r = await asyncio.to_thread(_bt_one_symbol, df5, df15, dfh1, dfh4, sym)
+        results.append(r)
+    return results
 
+
+# ============================== DIAG ==============================
+def _diag_one_symbol(df_m5, df_m15, df_h1, df_h4, symbol):
+    df_m5 = df_m5.reset_index(drop=True); df_m15 = df_m15.reset_index(drop=True)
+    df_h1 = df_h1.reset_index(drop=True); df_h4 = df_h4.reset_index(drop=True)
     n = len(df_m5)
     a5_full = (df_m5["high"] - df_m5["low"]).rolling(14).mean()
-    m5_ep = df_m5["epoch"].values
-    h1_ep = df_h1["epoch"].values
+    m5_ep = df_m5["epoch"].values; h1_ep = df_h1["epoch"].values
     h4_ep = df_h4["epoch"].values
-
-    c = {"bars": 0, "htf_ok": 0, "pattern": 0, "zone": 0,
-         "sweep": 0, "trendline": 0, "trade": 0}
-
-    for i in range(WARM_BARS, n - 200, 10):     # sample every 10th bar
+    c = {"bars":0,"htf_ok":0,"pattern":0,"zone":0,"sweep":0,"trendline":0,"trade":0}
+    for i in range(WARM_BARS, n - 200, 10):
         c["bars"] += 1
         av5 = a5_full.iloc[i]
         if pd.isna(av5) or av5 == 0: continue
-
         ep = m5_ep[i]
         h1_pos = np.searchsorted(h1_ep, ep, side="right") - 1
         h4_pos = np.searchsorted(h4_ep, ep, side="right") - 1
         if h1_pos < 50 or h4_pos < 50: continue
-
-        bh1 = htf_bias(df_h1.iloc[max(0, h1_pos-200):h1_pos+1])
-        bh4 = htf_bias(df_h4.iloc[max(0, h4_pos-200):h4_pos+1])
-
-        # Stage 1: HTF
+        bh1 = htf_bias(df_h1.iloc[max(0,h1_pos-200):h1_pos+1])
+        bh4 = htf_bias(df_h4.iloc[max(0,h4_pos-200):h4_pos+1])
         if (bh4 != "NEUTRAL" and bh1 == bh4) or \
            (bh4 != "NEUTRAL" and bh1 != "NEUTRAL" and bh4 != bh1):
-            c["htf_ok"] += 1
-            target = bh4
-        else:
-            continue
-
+            c["htf_ok"] += 1; target = bh4
+        else: continue
         w = df_m5.iloc[max(0, i-200):i+1].reset_index(drop=True)
-
-        # Stage 2: pattern
         pat = detect_pattern(w)
         if not pat or pat["bias"] != target: continue
         c["pattern"] += 1
-
-        # Stage 3: zone
         zones = mark_freshness(detect_zones(w, 120), w)
         side = "demand" if target == "BULL" else "supply"
-        price = float(w["close"].iloc[-1])
         zone = next((z for z in zones if z["side"] == side and z["fresh"]
-                     and price_in_zone(price, z, pad=av5*0.25)), None)
+                     and price_interacts_zone(w, z, side, 3, av5*0.25)), None)
         if not zone: continue
         c["zone"] += 1
-
-        # Stage 4: sweep
         pools = equal_levels(w, 0.0008)
         sweep = None
         for pool in pools:
-            sw = detect_sweep(w, pool, 5)
-            if sw and sw["bias"] == target and sw["idx"] >= len(w) - 6:
+            sw = detect_sweep(w, pool, 8)
+            if sw and sw["bias"] == target and sw["idx"] >= len(w) - 8:
                 sweep = sw; break
         if not sweep: continue
         c["sweep"] += 1
-
-        # Stage 5: trendline
         piv = find_pivots(w)
-        tl_h = fit_trendline(piv, "H", 3)
-        tl_l = fit_trendline(piv, "L", 3)
-        idx = len(w) - 1
-        tl_ok = False
+        tl_h = fit_trendline(piv, "H", 2); tl_l = fit_trendline(piv, "L", 2)
+        idx = len(w) - 1; tl_ok = False
         if target == "BULL":
-            if tl_l and tl_touch(tl_l, w, idx, 0.5, av5): tl_ok = True
+            if tl_l and tl_touch(tl_l, w, idx, 0.6, av5): tl_ok = True
             elif tl_h and tl_break(tl_h, w, idx): tl_ok = True
         else:
-            if tl_h and tl_touch(tl_h, w, idx, 0.5, av5): tl_ok = True
+            if tl_h and tl_touch(tl_h, w, idx, 0.6, av5): tl_ok = True
             elif tl_l and tl_break(tl_l, w, idx): tl_ok = True
         if not tl_ok: continue
         c["trendline"] += 1
-
-        # Trade survived all filters
         if target == "BULL":
-            sl = float(zone["bot"] - av5*0.5); risk = price - sl
+            sl = float(zone["bot"] - av5*0.5); risk = w["close"].iloc[-1] - sl
         else:
-            sl = float(zone["top"] + av5*0.5); risk = sl - price
-        if risk <= 0 or risk > av5 * 3: continue
+            sl = float(zone["top"] + av5*0.5); risk = sl - w["close"].iloc[-1]
+        if risk <= 0 or risk > av5 * 4: continue
         c["trade"] += 1
-
     return {"symbol": symbol, **c}
-
-
-async def diag_cmd(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    args = list(ctx.args or [])
-    months = 3
-    if args and args[-1].isdigit():
-        months = int(args[-1]); args = args[:-1]
-
-    if args and args[0] in SYMBOL_MAP:
-        syms = [args[0]]
-    else:
-        syms = list(SYMBOL_MAP.keys())
-
-    chat_id = upd.effective_chat.id
-    await ctx.bot.send_message(chat_id=chat_id,
-        text=f"🔬 Diagnosing {', '.join(syms)} over {months}mo…")
-
-    lines = [f"🔬 FILTER FUNNEL ({months}mo)\n"]
-    for sym in syms:
-        await ctx.bot.send_message(chat_id=chat_id,
-            text=f"📥 {sym}: downloading…")
-
-        try:
-            df_m5 = await asyncio.wait_for(
-                download_history(to_deriv(sym), months),
-                timeout=180)
-        except asyncio.TimeoutError:
-            lines.append(f"{sym}: ⏱ download timed out (3 min)")
-            continue
-
-        if df_m5 is None or len(df_m5) < 500:
-            lines.append(f"{sym}: ❌ no data")
-            continue
-
-        await ctx.bot.send_message(chat_id=chat_id,
-            text=f"⚙️ {sym}: {len(df_m5)} bars — diagnosing…")
-
-        df5, df15, dfh1, dfh4 = await asyncio.to_thread(_prepare_dataframes, df_m5)
-        r = await asyncio.to_thread(_diag_one_symbol, df5, df15, dfh1, dfh4, sym)
-
-        lines.append(
-            f"── {r['symbol']} ──\n"
-            f"Bars sampled: {r['bars']}\n"
-            f"  HTF bias ok:     {r['htf_ok']}\n"
-            f"  + pattern:       {r['pattern']}\n"
-            f"  + fresh zone:    {r['zone']}\n"
-            f"  + liquidity sweep: {r['sweep']}\n"
-            f"  + trendline:     {r['trendline']}\n"
-            f"  = FULL SETUPS:   {r['trade']}"
-        )
-
-    lines.append("\nFind where the biggest drop is — that's the filter to loosen.")
-    txt = "\n\n".join(lines)
-    for chunk in [txt[i:i+3800] for i in range(0, len(txt), 3800)]:
-        await ctx.bot.send_message(chat_id=chat_id, text=chunk)
-    for sym in symbols:
-        if progress_cb:
-            await progress_cb(f"📥 Downloading {months}mo M5 history for {sym}…")
-        df_m5 = await download_history(to_deriv(sym), months)
-        if df_m5 is None or len(df_m5) < 500:
-            results.append({"symbol": sym, "error": "no data"})
-            continue
-
-        if progress_cb:
-            await progress_cb(f"⚙️ Resampling + backtesting {sym} "
-                              f"({len(df_m5)} M5 bars)…")
-
-        df5, df15, dfh1, dfh4 = await asyncio.to_thread(
-            _prepare_dataframes, df_m5)
-        r = await asyncio.to_thread(
-            _bt_one_symbol, df5, df15, dfh1, dfh4, sym)
-        results.append(r)
-    return results
 
 
 # ============================== TRACKER ==============================
@@ -780,15 +659,16 @@ async def tracker_loop():
         await asyncio.sleep(60)
 
 
-# ============================== TELEGRAM HANDLERS ==============================
+# ============================== HANDLERS ==============================
 async def start_cmd(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await upd.message.reply_text(
-        "StarFX V15.1 — S/D + Liquidity + Trendlines + Counter-Trend\n"
+        "StarFX V15.2 — S/D + Liquidity + Trendlines + Counter-Trend\n"
         f"Active: {', '.join(get_active_symbols())}\n\n"
-        "/signal  — scan symbols\n"
-        "/price   — live prices\n"
-        "/report  — real performance stats\n"
-        "/backtest [symbol|all] [months=9]"
+        "/signal — scan symbols\n"
+        "/price — live prices\n"
+        "/report — performance stats\n"
+        "/diag [symbol] [months] — filter funnel\n"
+        "/backtest [symbol|all] [months]"
     )
 
 
@@ -801,15 +681,12 @@ async def price_cmd(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def signal_cmd(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await upd.message.reply_text("🔍 Scanning zones / liquidity / trendlines…")
+    await upd.message.reply_text("🔍 Scanning…")
     found = 0
     for sym in get_active_symbols():
-        try:
-            setup = await evaluate_setup(sym)
-        except Exception as e:
-            print("eval err", sym, e); continue
+        try: setup = await evaluate_setup(sym)
+        except Exception as e: print("eval err", sym, e); continue
         if not setup: continue
-
         found += 1
         last_signal_time[sym] = time.time()
         sid = db_save(setup)
@@ -818,30 +695,26 @@ async def signal_cmd(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
             chart_path = build_chart(setup)
             cap = (f"{setup['bias']} {sym} | {setup['pattern']} | "
                    f"{setup['mode']} {setup['tf']}\n"
-                   f"Zone: {setup['zone_kind']}  Sweep: {setup['sweep']}  "
-                   f"TL: {setup['tl']}\n"
+                   f"Zone {setup['zone_kind']}  Sweep {setup['sweep']}  "
+                   f"TL {setup['tl']}\n"
                    f"H1:{setup['bh1']}  H4:{setup['bh4']}\n"
                    f"Entry {fmt_price(sym, setup['entry'])}  "
                    f"SL {fmt_price(sym, setup['sl'])}  "
-                   f"TP(2R) {fmt_price(sym, setup['tp'])}  "
-                   f"R:R 1:{RR:.1f}  (id #{sid})")
+                   f"TP {fmt_price(sym, setup['tp'])}  2R  id#{sid}")
             with open(chart_path, "rb") as ph:
                 await ctx.bot.send_photo(chat_id=upd.effective_chat.id,
                                           photo=ph, caption=cap)
         except Exception as e:
             print("chart err", e)
             await ctx.bot.send_message(chat_id=upd.effective_chat.id,
-                text=f"{sym} setup #{sid} found (chart failed: {e})")
+                text=f"{sym} setup #{sid} (chart failed: {e})")
         finally:
             if chart_path and os.path.exists(chart_path):
                 try: os.remove(chart_path)
                 except: pass
-
     if found == 0:
         await ctx.bot.send_message(chat_id=upd.effective_chat.id,
-            text="❌ No qualifying setups (needs pattern + fresh zone + "
-                 "liquidity sweep + trendline).\n"
-                 "Try /price to confirm feed is live.")
+            text="❌ No qualifying setups.\nTry /price then /diag R_75 1.")
 
 
 async def report_cmd(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -854,13 +727,48 @@ async def report_cmd(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
     pf = (wins * RR) / max(1, losses)
     await upd.message.reply_text(
         f"📊 REPORT — {datetime.now().strftime('%Y-%m-%d')}\n"
-        f"Total signals: {s.get('total', 0)}\n"
-        f"Wins (TP): {wins}  Losses (SL): {losses}  "
-        f"Expired: {expd}  Open: {opens}\n"
-        f"Win rate: {wr:.1f}%\n"
-        f"Expectancy: {expct:+.2f}R\n"
-        f"Profit factor: {pf:.2f}"
+        f"Total: {s.get('total', 0)}\n"
+        f"Wins: {wins}  Losses: {losses}  Exp: {expd}  Open: {opens}\n"
+        f"WR: {wr:.1f}%  Exp: {expct:+.2f}R  PF: {pf:.2f}"
     )
+
+
+async def diag_cmd(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    args = list(ctx.args or [])
+    months = 3
+    if args and args[-1].isdigit():
+        months = int(args[-1]); args = args[:-1]
+    syms = [args[0]] if (args and args[0] in SYMBOL_MAP) else list(SYMBOL_MAP.keys())
+    chat_id = upd.effective_chat.id
+    await ctx.bot.send_message(chat_id=chat_id,
+        text=f"🔬 Diagnosing {', '.join(syms)} over {months}mo…")
+    lines = [f"🔬 FILTER FUNNEL ({months}mo)\n"]
+    for sym in syms:
+        await ctx.bot.send_message(chat_id=chat_id, text=f"📥 {sym}: downloading…")
+        try:
+            df_m5 = await asyncio.wait_for(
+                download_history(to_deriv(sym), months), timeout=180)
+        except asyncio.TimeoutError:
+            lines.append(f"{sym}: ⏱ timeout"); continue
+        if df_m5 is None or len(df_m5) < 500:
+            lines.append(f"{sym}: ❌ no data"); continue
+        await ctx.bot.send_message(chat_id=chat_id,
+            text=f"⚙️ {sym}: {len(df_m5)} bars — analyzing…")
+        df5, df15, dfh1, dfh4 = await asyncio.to_thread(_prepare_dataframes, df_m5)
+        r = await asyncio.to_thread(_diag_one_symbol, df5, df15, dfh1, dfh4, sym)
+        lines.append(
+            f"── {r['symbol']} ──\n"
+            f"Bars: {r['bars']}\n"
+            f"HTF ok:  {r['htf_ok']}\n"
+            f"+pattern: {r['pattern']}\n"
+            f"+zone:    {r['zone']}\n"
+            f"+sweep:   {r['sweep']}\n"
+            f"+trendline: {r['trendline']}\n"
+            f"= SETUPS: {r['trade']}"
+        )
+    txt = "\n\n".join(lines)
+    for chunk in [txt[i:i+3800] for i in range(0, len(txt), 3800)]:
+        await ctx.bot.send_message(chat_id=chat_id, text=chunk)
 
 
 async def backtest_cmd(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -868,61 +776,36 @@ async def backtest_cmd(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
     months = 9
     if args and args[-1].isdigit():
         months = int(args[-1]); args = args[:-1]
-
-    if args and args[0].lower() not in ("all", ""):
-        target = args[0]
-        if target in SYMBOL_MAP:
-            syms = [target]
-        else:
-            await upd.message.reply_text(
-                f"Unknown symbol. Use one of {list(SYMBOL_MAP)}")
-            return
-    else:
-        syms = list(SYMBOL_MAP.keys())
-
+    syms = [args[0]] if (args and args[0] in SYMBOL_MAP) else list(SYMBOL_MAP.keys())
     chat_id = upd.effective_chat.id
     await ctx.bot.send_message(chat_id=chat_id,
-        text=f"🧪 Backtest starting: {', '.join(syms)} — {months} months M5.\n"
-             f"This may take a few minutes. Progress below…")
-
+        text=f"🧪 Backtest {', '.join(syms)} — {months}mo…")
     async def progress_cb(msg):
-        try:
-            await ctx.bot.send_message(chat_id=chat_id, text=msg)
-        except:
-            pass
-
+        try: await ctx.bot.send_message(chat_id=chat_id, text=msg)
+        except: pass
     try:
-        results = await run_backtest(syms, months=months,
-                                      progress_cb=progress_cb)
+        results = await run_backtest(syms, months=months, progress_cb=progress_cb)
     except Exception as e:
-        await ctx.bot.send_message(chat_id=chat_id,
-                                    text=f"Backtest failed: {e}")
-        return
-
-    lines = [f"📈 BACKTEST RESULTS ({months}mo M5)\n"]
+        await ctx.bot.send_message(chat_id=chat_id, text=f"Failed: {e}"); return
+    lines = [f"📈 BACKTEST ({months}mo)\n"]
     for r in results:
         if "error" in r:
-            lines.append(f"{r['symbol']}: ❌ {r['error']}")
-            continue
-        wt  = r["by_mode"].get("WITH_TREND", {"n": 0, "wr": 0})
-        ct  = r["by_mode"].get("COUNTER",    {"n": 0, "wr": 0})
-        m5s = r["by_tf"].get("M5",           {"n": 0, "wr": 0})
-        m15 = r["by_tf"].get("M15",          {"n": 0, "wr": 0})
+            lines.append(f"{r['symbol']}: ❌ {r['error']}"); continue
+        wt = r["by_mode"].get("WITH_TREND", {"n":0,"wr":0})
+        ct = r["by_mode"].get("COUNTER",    {"n":0,"wr":0})
+        m5s = r["by_tf"].get("M5",  {"n":0,"wr":0})
+        m15 = r["by_tf"].get("M15", {"n":0,"wr":0})
         lines.append(
             f"── {r['symbol']} ──\n"
-            f"Trades: {r['trades']}  (W {r['wins']} / L {r['losses']} / "
-            f"Exp {r['expired']})\n"
-            f"Win rate: {r['wr']:.1f}%\n"
-            f"Expectancy: {r['expectancy']:+.2f}R  |  PF: {r['pf']:.2f}\n"
-            f"  ▸ With-trend: {wt['n']} trades, WR {wt['wr']:.1f}%\n"
-            f"  ▸ Counter:    {ct['n']} trades, WR {ct['wr']:.1f}%\n"
-            f"  ▸ M5 setups:  {m5s['n']} trades, WR {m5s['wr']:.1f}%\n"
-            f"  ▸ M15 setups: {m15['n']} trades, WR {m15['wr']:.1f}%"
+            f"Trades: {r['trades']}  W {r['wins']}  L {r['losses']}  E {r['expired']}\n"
+            f"WR: {r['wr']:.1f}%  Exp: {r['expectancy']:+.2f}R  PF: {r['pf']:.2f}\n"
+            f"  With-trend: {wt['n']}t  WR {wt['wr']:.1f}%\n"
+            f"  Counter:    {ct['n']}t  WR {ct['wr']:.1f}%\n"
+            f"  M5:  {m5s['n']}t  WR {m5s['wr']:.1f}%\n"
+            f"  M15: {m15['n']}t  WR {m15['wr']:.1f}%"
         )
-    lines.append("\nRule: only deploy live if Expectancy > +0.20R.")
-
     txt = "\n\n".join(lines)
-    for chunk in [txt[i:i + 3800] for i in range(0, len(txt), 3800)]:
+    for chunk in [txt[i:i+3800] for i in range(0, len(txt), 3800)]:
         await ctx.bot.send_message(chat_id=chat_id, text=chunk)
 
 
@@ -939,19 +822,18 @@ async def post_init(app):
 def main():
     if not TELEGRAM_TOKEN:
         raise SystemExit("TELEGRAM_TOKEN env var required")
-    app = (Application.builder()
-           .token(TELEGRAM_TOKEN)
-           .post_init(post_init)
-           .build())
+    app = (Application.builder().token(TELEGRAM_TOKEN)
+           .post_init(post_init).build())
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("signal", signal_cmd))
     app.add_handler(CommandHandler("price", price_cmd))
     app.add_handler(CommandHandler("report", report_cmd))
+    app.add_handler(CommandHandler("diag", diag_cmd))
     app.add_handler(CommandHandler("backtest", backtest_cmd))
-    app.add_handler(CommandHandler("diag" ,diag_cmd))
     app.add_error_handler(error_handler)
-    print("StarFX V15.1 running…")
+    print("StarFX V15.2 running…")
     app.run_polling(drop_pending_updates=True)
+
 
 if __name__ == "__main__":
     main()
