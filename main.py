@@ -757,7 +757,7 @@ async def signal_cmd(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             print("autoscan err:", e)
         await asyncio.sleep(300)
-
+                    
 
 
 async def report_cmd(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
