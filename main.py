@@ -330,21 +330,22 @@ async def evaluate_setup(symbol):
     h4  = await fetch_data(symbol, "H4")
     if m5 is None or h1 is None or h4 is None: return None
     bh1, bh4 = htf_bias(h1), htf_bias(h4)
-    if bh4 == "NEUTRAL": return None
+if bh4 == "NEUTRAL": return None
 if bh1 == bh4 or bh1 == "NEUTRAL":
     mode, target = "WITH_TREND", bh4
     cands = [("M5", m5)]
 else:
     mode, target = "COUNTER", bh4
     cands = [("M5", m5), ("M15", m15)]
-    for tf_name, df in cands:
-        if df is None or len(df) < 60: continue
-        r = evaluate_setup_sync(df, target)
-        if r:
-            r.update({"symbol": symbol, "mode": mode, "tf": tf_name,
-                      "bh1": bh1, "bh4": bh4, "df": df})
-            return r
-    return None
+
+for tf_name, df in cands:
+    if df is None or len(df) < 60: continue
+    r = evaluate_setup_sync(df, target)
+    if r:
+        r.update({"symbol": symbol, "mode": mode, "tf": tf_name,
+                  "bh1": bh1, "bh4": bh4, "df": df})
+        return r
+return None
 
 # ============================== DB ==============================
 _db_lock = Lock()
