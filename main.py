@@ -723,7 +723,42 @@ async def signal_cmd(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 except: pass
     if found == 0:
         await ctx.bot.send_message(chat_id=upd.effective_chat.id,
-            text="❌ No qualifying setups.\nTry /price then /diag R_75 1.")
+            text="❌ No qualifying setups right now.\n"
+     f"Auto-scanner runs every 5 min. Active: {', '.join(get_active_symbols())}")
+        async def autoscan_loop(app):
+    await asyncio.sleep(30)
+    while True:
+        try:
+            for sym in get_active_symbols():
+                setup = await evaluate_setup(sym)
+                if not setup: continue
+                last_signal_time[sym] = time.time()
+                sid = db_save(setup)
+                chart_path = None
+                try:
+                    chart_path = build_chart(setup)
+                    cap = (f"AUTO {setup['bias']} {sym} | {setup['pattern']} | "
+                           f"{setup['mode']} {setup['tf']}\n"
+                           f"Zone {setup['zone_kind']}  Sweep {setup['sweep']}  "
+                           f"TL {setup['tl']}\n"
+                           f"H1:{setup['bh1']}  H4:{setup['bh4']}\n"
+                           f"Entry {fmt_price(sym, setup['entry'])}  "
+                           f"SL {fmt_price(sym, setup['sl'])}  "
+                           f"TP {fmt_price(sym, setup['tp'])}  2R  id#{sid}")
+                    with open(chart_path, "rb") as ph:
+                        await app.bot.send_photo(chat_id=TELEGRAM_CHAT_ID,
+                                                  photo=ph, caption=cap)
+                except Exception as e:
+                    print("autoscan chart err:", e)
+                finally:
+                    if chart_path and os.path.exists(chart_path):
+                        try: os.remove(chart_path)
+                        except: pass
+        except Exception as e:
+            print("autoscan err:", e)
+        await asyncio.sleep(300)
+
+
 
 
 async def report_cmd(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -826,7 +861,7 @@ async def error_handler(upd, ctx):
 async def post_init(app):
     db_init()
     asyncio.create_task(tracker_loop())
-
+    asyncio.create_task(autoscan_loop(app))
 
 def main():
     if not TELEGRAM_TOKEN:
