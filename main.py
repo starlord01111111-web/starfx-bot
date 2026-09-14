@@ -202,7 +202,7 @@ def price_interacts_zone(df, zone, side, lookback=3, pad=0.0):
     return bool(((recent["low"] <= top) & (recent["high"] >= bot)).any())
 
 # ============================== LIQUIDITY ==============================
-def equal_levels(df, tolerance=0.0008, min_touches=2):
+def equal_levels(df, tolerance=0.0025, min_touches=2):
     h, l = df["high"].values, df["low"].values
     piv = []
     for i in range(2, len(df) - 2):
@@ -250,7 +250,7 @@ def fit_trendline(pivots, kind="H", min_pts=2):
     ss_res = ((ys - pred) ** 2).sum()
     ss_tot = ((ys - ys.mean()) ** 2).sum() or 1e-9
     r2 = 1 - ss_res / ss_tot
-    if r2 < 0.5: return None
+    if r2 < 0.4: return None
     return {"slope": float(slope), "intercept": float(inter),
             "r2": float(r2), "kind": kind, "x0": int(xs[0]), "x1": int(xs[-1])}
 
@@ -278,13 +278,13 @@ def evaluate_setup_sync(df, target_bias, atr_val=None, min_bars=60):
                  and price_interacts_zone(df, z, side, 3, atr_val * 0.25)), None)
     if not zone: return None
 
-    pools = equal_levels(df, 0.0008)
-    sweep = None
-    for pool in pools:
-        sw = detect_sweep(df, pool, 8)
-        if sw and sw["bias"] == target_bias and sw["idx"] >= len(df) - 8:
-            sweep = sw; break
-    if not sweep: return None
+   pools = equal_levels(w, 0.0025)
+sweep = None
+for pool in pools:
+    sw = detect_sweep(w, pool, 20)
+    if sw and sw["bias"] == target and sw["idx"] >= len(w) - 20:
+        sweep = sw; break
+if not sweep: continue 
 
     piv = find_pivots(df)
     tl_h = fit_trendline(piv, "H", 2)
