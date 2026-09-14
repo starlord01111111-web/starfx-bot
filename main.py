@@ -179,20 +179,29 @@ def detect_zones(df, lookback=120, impulse_atr=1.5):
     return keep
 
 def mark_freshness(zones, df):
+    """A zone is fresh unless price CLOSED through it (not just wicks)."""
     last_idx = len(df) - 1
+    a = (df["high"] - df["low"]).rolling(14).mean().iloc[-1]
+    if pd.isna(a) or a == 0:
+        a = (df["high"] - df["low"]).mean()
     for z in zones:
         after = df.iloc[z["created_idx"] + 1 : last_idx]
         if len(after) == 0:
             z["fresh"] = True
+            continue
+        if z["side"] == "demand":
+            broken = (after["close"] < z["bot"] - a * 0.3).any()
         else:
-            touched = ((after["low"]  <= z["top"]) &
-                       (after["high"] >= z["bot"])).any()
-            z["fresh"] = not touched
+            broken = (after["close"] > z["top"] + a * 0.3).any()
+        z["fresh"] = not broken
     return zones
 
-def price_in_zone(p, z, pad=0.0):
-    return (z["bot"] - pad) <= p <= (z["top"] + pad)
-
+def price_interacts_zone(df, zone, side, lookback=3, pad=0.0):
+    """Was the zone touched (wick or close) in the last `lookback` bars?"""
+    recent = df.iloc[-lookback:]
+    top = zone["top"] + pad
+    bot = zone["bot"] - pad
+    return bool(((recent["low"] <= top) & (recent["high"] >= bot)).any())
 # ============================== LIQUIDITY ==============================
 def equal_levels(df, tolerance=0.0008, min_touches=2):
     h, l = df["high"].values, df["low"].values
@@ -268,7 +277,8 @@ def evaluate_setup_sync(df, target_bias, atr_val=None, min_bars=60):
     side = "demand" if target_bias == "BULL" else "supply"
     price = float(df["close"].iloc[-1])
     zone = next((z for z in zones if z["side"] == side and z["fresh"]
-                 and price_in_zone(price, z, pad=atr_val * 0.25)), None)
+             and price_interacts_zone(df, z, side, lookback=3,
+                                       pad=atr_val * 0.25)), None)
     if not zone: return None
     pools = equal_levels(df, 0.0008)
     sweep = None
