@@ -444,7 +444,7 @@ def build_chart(setup):
     return path
 
 # ============================== BACKTEST ==============================
-async def download_history(deriv_sym, months=9):
+async def download_history(deriv_sym, months=9):     ← START of what to replace
     total_needed = months * 30 * 24 * 12 + 500
     all_c = []
     end = "latest"
@@ -470,7 +470,7 @@ async def download_history(deriv_sym, months=9):
         df[c] = df[c].astype(float)
     df["epoch"] = pd.to_datetime(df["epoch"], unit="s", utc=True)
     df = df.drop_duplicates("epoch").reset_index(drop=True)
-    return df
+    return df                                          ← END of what to replace
 
 
 def _prepare_dataframes(df_m5):
@@ -706,11 +706,27 @@ async def diag_cmd(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     lines = [f"🔬 FILTER FUNNEL ({months}mo)\n"]
     for sym in syms:
-        df_m5 = await download_history(to_deriv(sym), months)
+        await ctx.bot.send_message(chat_id=chat_id,
+            text=f"📥 {sym}: downloading…")
+
+        try:
+            df_m5 = await asyncio.wait_for(
+                download_history(to_deriv(sym), months),
+                timeout=180)
+        except asyncio.TimeoutError:
+            lines.append(f"{sym}: ⏱ download timed out (3 min)")
+            continue
+
         if df_m5 is None or len(df_m5) < 500:
-            lines.append(f"{sym}: no data"); continue
+            lines.append(f"{sym}: ❌ no data")
+            continue
+
+        await ctx.bot.send_message(chat_id=chat_id,
+            text=f"⚙️ {sym}: {len(df_m5)} bars — diagnosing…")
+
         df5, df15, dfh1, dfh4 = await asyncio.to_thread(_prepare_dataframes, df_m5)
         r = await asyncio.to_thread(_diag_one_symbol, df5, df15, dfh1, dfh4, sym)
+
         lines.append(
             f"── {r['symbol']} ──\n"
             f"Bars sampled: {r['bars']}\n"
@@ -721,6 +737,7 @@ async def diag_cmd(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"  + trendline:     {r['trendline']}\n"
             f"  = FULL SETUPS:   {r['trade']}"
         )
+
     lines.append("\nFind where the biggest drop is — that's the filter to loosen.")
     txt = "\n\n".join(lines)
     for chunk in [txt[i:i+3800] for i in range(0, len(txt), 3800)]:
@@ -934,8 +951,7 @@ def main():
     app.add_handler(CommandHandler("diag" ,diag_cmd))
     app.add_error_handler(error_handler)
     print("StarFX V15.1 running…")
-    app.run_polling()
-
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
