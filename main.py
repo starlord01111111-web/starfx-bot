@@ -714,6 +714,144 @@ async def run_one(symbol, months):
     print(f"   done in {time.time()-t0:.1f}s")
     return summarize(trades, symbol, months)
 
+# ============================== TELEGRAM HANDLERS ==============================
+async def start_cmd(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await upd.message.reply_text(
+        "StarFX V15.1 — S/D + Liquidity + Trendlines + Counter-Trend\n"
+        f"Active: {', '.join(get_active_symbols())}\n\n"
+        "/signal  — scan symbols\n"
+        "/price   — live prices\n"
+        "/report  — real performance stats\n"
+        "/backtest [symbol|all] [months=9]"
+    )
+
+async def price_cmd(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    lines = ["💰 Live:"]
+    for sym in get_active_symbols():
+        p = await fetch_price(sym)
+        lines.append(f"{sym}: {fmt_price(sym, p) if p else 'feed lag'}")
+    await upd.message.reply_text("\n".join(lines))
+
+async def signal_cmd(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await upd.message.reply_text("🔍 Scanning zones / liquidity / trendlines…")
+    found = 0
+    for sym in get_active_symbols():
+        try:
+            setup = await evaluate_setup(sym)
+        except Exception as e:
+            print("eval err", sym, e); continue
+        if not setup: continue
+
+        found += 1
+        last_signal_time[sym] = time.time()
+        sid = db_save(setup)
+        chart_path = None
+        try:
+            chart_path = build_chart(setup)
+            cap = (f"{setup['bias']} {sym} | {setup['pattern']} | "
+                   f"{setup['mode']} {setup['tf']}\n"
+                   f"Zone: {setup['zone_kind']}  Sweep: {setup['sweep']}  "
+                   f"TL: {setup['tl']}\n"
+                   f"H1:{setup['bh1']}  H4:{setup['bh4']}\n"
+                   f"Entry {fmt_price(sym, setup['entry'])}  "
+                   f"SL {fmt_price(sym, setup['sl'])}  "
+                   f"TP(2R) {fmt_price(sym, setup['tp'])}  "
+                   f"R:R 1:{RR:.1f}  (id #{sid})")
+            with open(chart_path, "rb") as ph:
+                await ctx.bot.send_photo(chat_id=upd.effective_chat.id,
+                                          photo=ph, caption=cap)
+        except Exception as e:
+            print("chart err", e)
+            await ctx.bot.send_message(chat_id=upd.effective_chat.id,
+                text=f"{sym} setup #{sid} found (chart failed: {e})")
+        finally:
+            if chart_path and os.path.exists(chart_path):
+                try: os.remove(chart_path)
+                except: pass
+
+    if found == 0:
+        await ctx.bot.send_message(chat_id=upd.effective_chat.id,
+            text="❌ No qualifying setups (needs pattern + fresh zone + "
+                 "liquidity sweep + trendline).\n"
+                 "Try /price to confirm feed is live.")
+
+async def report_cmd(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    s = db_stats()
+    wins = s.get("TP", 0); losses = s.get("SL", 0)
+    opens = s.get("OPEN", 0); expd = s.get("EXPIRED", 0)
+    n_done = wins + losses
+    wr = wins / n_done * 100 if n_done else 0
+    expct = (wins * RR - losses) / max(1, n_done) if n_done else 0
+    pf = (wins * RR) / max(1, losses)
+    await upd.message.reply_text(
+        f"📊 REPORT — {datetime.now().strftime('%Y-%m-%d')}\n"
+        f"Total signals: {s.get('total', 0)}\n"
+        f"Wins (TP): {wins}  Losses (SL): {losses}  "
+        f"Expired: {expd}  Open: {opens}\n"
+        f"Win rate: {wr:.1f}%\n"
+        f"Expectancy: {expct:+.2f}R\n"
+        f"Profit factor: {pf:.2f}"
+    )
+
+async def backtest_cmd(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    args = list(ctx.args or [])
+    months = 9
+    if args and args[-1].isdigit():
+        months = int(args[-1]); args = args[:-1]
+
+    if args and args[0].lower() not in ("all", ""):
+        target = args[0]
+        if target in SYMBOL_MAP:
+            syms = [target]
+        else:
+            await upd.message.reply_text(
+                f"Unknown symbol. Use one of {list(SYMBOL_MAP)}")
+            return
+    else:
+        syms = list(SYMBOL_MAP.keys())
+
+    chat_id = upd.effective_chat.id
+    await ctx.bot.send_message(chat_id=chat_id,
+        text=f"🧪 Backtest starting: {', '.join(syms)} — {months} months M5.\n"
+             f"This may take a few minutes. Progress below…")
+
+    async def progress_cb(msg):
+        try:
+            await ctx.bot.send_message(chat_id=chat_id, text=msg)
+        except: pass
+
+    try:
+        results = await run_backtest(syms, months=months,
+                                      progress_cb=progress_cb)
+    except Exception as e:
+        await ctx.bot.send_message(chat_id=chat_id,
+                                    text=f"Backtest failed: {e}")
+        return
+
+    lines = [f"📈 BACKTEST RESULTS ({months}mo M5)\n"]
+    for r in results:
+        if "error" in r:
+            lines.append(f"{r['symbol']}: ❌ {r['error']}")
+            continue
+        wt, ct = r["with_trend"], r["counter"]
+        lines.append(
+            f"── {r['symbol']} ──\n"
+            f"Trades: {r['trades']}  (W {r['wins']} / L {r['losses']} / "
+            f"Exp {r['expired']})\n"
+            f"Win rate: {r['wr']:.1f}%\n"
+            f"Expectancy: {r['expectancy']:+.2f}R  |  PF: {r['pf']:.2f}\n"
+            f"  ▸ With-trend: {wt['n']} trades, WR {wt['wr']:.1f}%\n"
+            f"  ▸ Counter:    {ct['n']} trades, WR {ct['wr']:.1f}%"
+        )
+    lines.append("\nRule: only deploy live if Expectancy > +0.20R.")
+
+    txt = "\n\n".join(lines)
+    for chunk in [txt[i:i + 3800] for i in range(0, len(txt), 3800)]:
+        await ctx.bot.send_message(chat_id=chat_id, text=chunk)
+
+async def error_handler(upd, ctx):
+    print("PTB error:", ctx.error)
+
 # ============================== MAIN ==============================
 async def post_init(app):
     db_init()
@@ -737,5 +875,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-    
