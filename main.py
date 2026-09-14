@@ -714,51 +714,28 @@ async def run_one(symbol, months):
     print(f"   done in {time.time()-t0:.1f}s")
     return summarize(trades, symbol, months)
 
-async def main():
-    args = sys.argv[1:]
+# ============================== MAIN ==============================
+async def post_init(app):
+    db_init()
+    asyncio.create_task(tracker_loop())
 
-    months = 9
-    if args and args[-1].isdigit():
-        months = int(args[-1]); args = args[:-1]
-
-    if args and args[0].lower() not in ("all", ""):
-        if args[0] in SYMBOL_MAP:
-            syms = [args[0]]
-        else:
-            print(f"Unknown symbol. Use: {list(SYMBOL_MAP)}")
-            return
-    else:
-        syms = list(SYMBOL_MAP.keys())
-
-    print(f"Symbols: {syms}")
-    print(f"Months:  {months}")
-
-    results = []
-    for sym in syms:
-        try:
-            r = await run_one(sym, months)
-            if r:
-                results.append(r)
-                print_result(r)
-        except Exception as e:
-            print(f"❌ {sym} failed: {e}")
-
-    # Summary
-    if results:
-        print()
-        print("════════════════════════════════════════")
-        print("  SUMMARY")
-        print("════════════════════════════════════════")
-        total_trades = sum(r["trades"] for r in results)
-        total_w = sum(r["wins"] for r in results)
-        total_l = sum(r["losses"] for r in results)
-        n_done = total_w + total_l
-        overall_wr = total_w / n_done * 100 if n_done else 0
-        overall_exp = (total_w * RR - total_l) / max(1, total_trades)
-        print(f"  Total trades: {total_trades}")
-        print(f"  Overall WR:   {overall_wr:.1f}%")
-        print(f"  Overall exp:  {overall_exp:+.2f}R")
-        print()
+def main():
+    if not TELEGRAM_TOKEN:
+        raise SystemExit("TELEGRAM_TOKEN env var required")
+    app = (Application.builder()
+           .token(TELEGRAM_TOKEN)
+           .post_init(post_init)
+           .build())
+    app.add_handler(CommandHandler("start", start_cmd))
+    app.add_handler(CommandHandler("signal", signal_cmd))
+    app.add_handler(CommandHandler("price", price_cmd))
+    app.add_handler(CommandHandler("report", report_cmd))
+    app.add_handler(CommandHandler("backtest", backtest_cmd))
+    app.add_error_handler(error_handler)
+    print("StarFX V15.1 running…")
+    app.run_polling()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
+
+    
