@@ -590,7 +590,7 @@ def _diag_one_symbol(df_m5, df_m15, df_h1, df_h4, symbol):
     m5_ep = df_m5["epoch"].values; h1_ep = df_h1["epoch"].values
     h4_ep = df_h4["epoch"].values
     c = {"bars":0,"htf_ok":0,"pattern":0,"zone":0,"sweep":0,"trendline":0,"trade":0}
-    for i in range(WARM_BARS, n - 200, 5):              # step 5 instead of 10
+    for i in range(WARM_BARS, n - 200, 5):
         c["bars"] += 1
         av5 = a5_full.iloc[i]
         if pd.isna(av5) or av5 == 0: continue
@@ -639,16 +639,16 @@ def _diag_one_symbol(df_m5, df_m15, df_h1, df_h4, symbol):
         if tl_ok: c["trendline"] += 1
 
         last_candle = w.iloc[-1]
-if target == "BULL":
-    sl = float(last_candle["low"] - av5*0.3)
-    risk = w["close"].iloc[-1] - sl
-else:
-    sl = float(last_candle["high"] + av5*0.3)
-    risk = sl - w["close"].iloc[-1]
-if risk <= 0 or risk > av5 * 2: continue
+        if target == "BULL":
+            sl = float(last_candle["low"] - av5*0.3)
+            risk = w["close"].iloc[-1] - sl
+        else:
+            sl = float(last_candle["high"] + av5*0.3)
+            risk = sl - w["close"].iloc[-1]
+        if risk <= 0 or risk > av5 * 2: continue
         c["trade"] += 1
-    return {"symbol": symbol, **c}
 
+    return {"symbol": symbol, **c}
 
 # ============================== TRACKER ==============================
 async def tracker_loop():
