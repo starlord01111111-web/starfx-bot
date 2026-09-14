@@ -179,12 +179,15 @@ def detect_zones(df, lookback=120, impulse_atr=1.5):
     return keep
 
 def mark_freshness(zones, df):
+    last_idx = len(df) - 1
     for z in zones:
-        after = df.iloc[z["created_idx"] + 1:]
-        if len(after) == 0: continue
-        touched = ((after["low"] <= z["top"]) &
-                   (after["high"] >= z["bot"])).any()
-        z["fresh"] = not touched
+        after = df.iloc[z["created_idx"] + 1 : last_idx]
+        if len(after) == 0:
+            z["fresh"] = True
+        else:
+            touched = ((after["low"]  <= z["top"]) &
+                       (after["high"] >= z["bot"])).any()
+            z["fresh"] = not touched
     return zones
 
 def price_in_zone(p, z, pad=0.0):
