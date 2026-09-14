@@ -587,6 +587,131 @@ def _bt_one_symbol(df_m5, df_m15, df_h1, df_h4, symbol):
 
 async def run_backtest(symbols, months=9, progress_cb=None):
     results = []
+    # ============================== DIAG ==============================
+def _diag_one_symbol(df_m5, df_m15, df_h1, df_h4, symbol):
+    df_m5  = df_m5.reset_index(drop=True)
+    df_m15 = df_m15.reset_index(drop=True)
+    df_h1  = df_h1.reset_index(drop=True)
+    df_h4  = df_h4.reset_index(drop=True)
+
+    n = len(df_m5)
+    a5_full = (df_m5["high"] - df_m5["low"]).rolling(14).mean()
+    m5_ep = df_m5["epoch"].values
+    h1_ep = df_h1["epoch"].values
+    h4_ep = df_h4["epoch"].values
+
+    c = {"bars": 0, "htf_ok": 0, "pattern": 0, "zone": 0,
+         "sweep": 0, "trendline": 0, "trade": 0}
+
+    for i in range(WARM_BARS, n - 200, 10):     # sample every 10th bar
+        c["bars"] += 1
+        av5 = a5_full.iloc[i]
+        if pd.isna(av5) or av5 == 0: continue
+
+        ep = m5_ep[i]
+        h1_pos = np.searchsorted(h1_ep, ep, side="right") - 1
+        h4_pos = np.searchsorted(h4_ep, ep, side="right") - 1
+        if h1_pos < 50 or h4_pos < 50: continue
+
+        bh1 = htf_bias(df_h1.iloc[max(0, h1_pos-200):h1_pos+1])
+        bh4 = htf_bias(df_h4.iloc[max(0, h4_pos-200):h4_pos+1])
+
+        # Stage 1: HTF
+        if (bh4 != "NEUTRAL" and bh1 == bh4) or \
+           (bh4 != "NEUTRAL" and bh1 != "NEUTRAL" and bh4 != bh1):
+            c["htf_ok"] += 1
+            target = bh4
+        else:
+            continue
+
+        w = df_m5.iloc[max(0, i-200):i+1].reset_index(drop=True)
+
+        # Stage 2: pattern
+        pat = detect_pattern(w)
+        if not pat or pat["bias"] != target: continue
+        c["pattern"] += 1
+
+        # Stage 3: zone
+        zones = mark_freshness(detect_zones(w, 120), w)
+        side = "demand" if target == "BULL" else "supply"
+        price = float(w["close"].iloc[-1])
+        zone = next((z for z in zones if z["side"] == side and z["fresh"]
+                     and price_in_zone(price, z, pad=av5*0.25)), None)
+        if not zone: continue
+        c["zone"] += 1
+
+        # Stage 4: sweep
+        pools = equal_levels(w, 0.0008)
+        sweep = None
+        for pool in pools:
+            sw = detect_sweep(w, pool, 5)
+            if sw and sw["bias"] == target and sw["idx"] >= len(w) - 6:
+                sweep = sw; break
+        if not sweep: continue
+        c["sweep"] += 1
+
+        # Stage 5: trendline
+        piv = find_pivots(w)
+        tl_h = fit_trendline(piv, "H", 3)
+        tl_l = fit_trendline(piv, "L", 3)
+        idx = len(w) - 1
+        tl_ok = False
+        if target == "BULL":
+            if tl_l and tl_touch(tl_l, w, idx, 0.5, av5): tl_ok = True
+            elif tl_h and tl_break(tl_h, w, idx): tl_ok = True
+        else:
+            if tl_h and tl_touch(tl_h, w, idx, 0.5, av5): tl_ok = True
+            elif tl_l and tl_break(tl_l, w, idx): tl_ok = True
+        if not tl_ok: continue
+        c["trendline"] += 1
+
+        # Trade survived all filters
+        if target == "BULL":
+            sl = float(zone["bot"] - av5*0.5); risk = price - sl
+        else:
+            sl = float(zone["top"] + av5*0.5); risk = sl - price
+        if risk <= 0 or risk > av5 * 3: continue
+        c["trade"] += 1
+
+    return {"symbol": symbol, **c}
+
+
+async def diag_cmd(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    args = list(ctx.args or [])
+    months = 3
+    if args and args[-1].isdigit():
+        months = int(args[-1]); args = args[:-1]
+
+    if args and args[0] in SYMBOL_MAP:
+        syms = [args[0]]
+    else:
+        syms = list(SYMBOL_MAP.keys())
+
+    chat_id = upd.effective_chat.id
+    await ctx.bot.send_message(chat_id=chat_id,
+        text=f"🔬 Diagnosing {', '.join(syms)} over {months}mo…")
+
+    lines = [f"🔬 FILTER FUNNEL ({months}mo)\n"]
+    for sym in syms:
+        df_m5 = await download_history(to_deriv(sym), months)
+        if df_m5 is None or len(df_m5) < 500:
+            lines.append(f"{sym}: no data"); continue
+        df5, df15, dfh1, dfh4 = await asyncio.to_thread(_prepare_dataframes, df_m5)
+        r = await asyncio.to_thread(_diag_one_symbol, df5, df15, dfh1, dfh4, sym)
+        lines.append(
+            f"── {r['symbol']} ──\n"
+            f"Bars sampled: {r['bars']}\n"
+            f"  HTF bias ok:     {r['htf_ok']}\n"
+            f"  + pattern:       {r['pattern']}\n"
+            f"  + fresh zone:    {r['zone']}\n"
+            f"  + liquidity sweep: {r['sweep']}\n"
+            f"  + trendline:     {r['trendline']}\n"
+            f"  = FULL SETUPS:   {r['trade']}"
+        )
+    lines.append("\nFind where the biggest drop is — that's the filter to loosen.")
+    txt = "\n\n".join(lines)
+    for chunk in [txt[i:i+3800] for i in range(0, len(txt), 3800)]:
+        await ctx.bot.send_message(chat_id=chat_id, text=chunk)
     for sym in symbols:
         if progress_cb:
             await progress_cb(f"📥 Downloading {months}mo M5 history for {sym}…")
@@ -793,6 +918,7 @@ def main():
     app.add_handler(CommandHandler("price", price_cmd))
     app.add_handler(CommandHandler("report", report_cmd))
     app.add_handler(CommandHandler("backtest", backtest_cmd))
+    app.add_handler(commandHandlr("diag" ,diag_cmd))
     app.add_error_handler(error_handler)
     print("StarFX V15.1 running…")
     app.run_polling()
