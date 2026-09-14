@@ -330,8 +330,7 @@ async def evaluate_setup(symbol):
     h4  = await fetch_data(symbol, "H4")
     if m5 is None or h1 is None or h4 is None: return None
     bh1, bh4 = htf_bias(h1), htf_bias(h4)
-    if bh4 == "NEUTRAL":
-    return None
+    if bh4 == "NEUTRAL": return None
 if bh1 == bh4 or bh1 == "NEUTRAL":
     mode, target = "WITH_TREND", bh4
     cands = [("M5", m5)]
