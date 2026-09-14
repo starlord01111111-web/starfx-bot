@@ -725,7 +725,6 @@ async def signal_cmd(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await ctx.bot.send_message(chat_id=upd.effective_chat.id,
             text="❌ No qualifying setups right now.\n"
      f"Auto-scanner runs every 5 min. Active: {', '.join(get_active_symbols())}")
-        
         async def autoscan_once(app):
     for sym in get_active_symbols():
         setup = await evaluate_setup(sym)
