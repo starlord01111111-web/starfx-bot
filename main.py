@@ -760,7 +760,6 @@ async def signal_cmd(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 
-
 async def report_cmd(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
     s = db_stats()
     wins = s.get("TP", 0); losses = s.get("SL", 0)
