@@ -918,7 +918,7 @@ def main():
     app.add_handler(CommandHandler("price", price_cmd))
     app.add_handler(CommandHandler("report", report_cmd))
     app.add_handler(CommandHandler("backtest", backtest_cmd))
-    app.add_handler(commandHandler("diag" ,diag_cmd))
+    app.add_handler(CommandHandler("diag" ,diag_cmd))
     app.add_error_handler(error_handler)
     print("StarFX V15.1 running…")
     app.run_polling()
