@@ -442,8 +442,11 @@ def build_chart(setup):
 # ============================== DOWNLOAD ==============================
 async def download_history(deriv_sym, months=9):
     total_needed = months * 30 * 24 * 12 + 500
-    all_c, end, attempts = [], "latest", 0
-    while len(all_c) < total_needed and attempts < 60:
+    all_c = []
+    end = "latest"
+    attempts = 0
+    max_attempts = 200
+    while len(all_c) < total_needed and attempts < max_attempts:
         attempts += 1
         try:
             resp = await _ws_fetch(deriv_sym, 300, DL_BATCH, end=end)
@@ -451,19 +454,24 @@ async def download_history(deriv_sym, months=9):
             print(f"  [{deriv_sym}] batch {attempts}: {got} bars (total {len(all_c)})")
         except asyncio.TimeoutError:
             print(f"  [{deriv_sym}] batch {attempts}: TIMEOUT, retry")
-            await asyncio.sleep(2); continue
+            await asyncio.sleep(2)
+            continue
         except Exception as e:
             print(f"  [{deriv_sym}] batch {attempts}: err {e}")
-            await asyncio.sleep(2); continue
-        if "candles" not in resp: break
+            await asyncio.sleep(2)
+            continue
+        if "candles" not in resp:
+            break
         batch = resp["candles"]
-        if not batch: break
+        if not batch:
+            break
         all_c = batch + all_c
         end = batch[0]["epoch"] - 1
-        if len(batch) < DL_BATCH: break
-    if not all_c: return None
+    if not all_c:
+        return None
     df = pd.DataFrame(all_c)
-    for c in ("open","high","low","close"): df[c] = df[c].astype(float)
+    for c in ("open", "high", "low", "close"):
+        df[c] = df[c].astype(float)
     df["epoch"] = pd.to_datetime(df["epoch"], unit="s", utc=True)
     df = df.drop_duplicates("epoch").reset_index(drop=True)
     print(f"  [{deriv_sym}] downloaded {len(df)} bars")
