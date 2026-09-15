@@ -757,9 +757,14 @@ async def autoscan_once(app):
                 except: pass
 
 async def autoscan_loop(app):
+    print("[autoscan] loop starting")
     await asyncio.sleep(30)
     while True:
-        await autoscan_once(app)
+        print(f"[autoscan] tick {datetime.now(timezone.utc).isoformat()} symbols={get_active_symbols()}")
+        try:
+            await autoscan_once(app)
+        except Exception as e:
+            print(f"[autoscan] error: {e}")
         await asyncio.sleep(300)
                     
 
@@ -863,9 +868,14 @@ async def error_handler(upd, ctx):
 # ============================== MAIN ==============================
 async def post_init(app):
     db_init()
+    try:
+        await app.bot.send_message(chat_id=TELEGRAM_CHAT_ID,
+                                    text="StarFX booted - this chat receives auto-signals")
+        print(f"[boot] ping OK to {TELEGRAM_CHAT_ID}")
+    except Exception as e:
+        print(f"[boot] ping FAILED: {e}")
     asyncio.create_task(tracker_loop())
     asyncio.create_task(autoscan_loop(app))
-
 def main():
     if not TELEGRAM_TOKEN:
         raise SystemExit("TELEGRAM_TOKEN env var required")
