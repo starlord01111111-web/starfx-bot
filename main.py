@@ -46,8 +46,11 @@ DL_BATCH       = 2000
 def to_deriv(s): return SYMBOL_MAP.get(s, s)
 def fmt_price(sym, p): return f"{p:.2f}" if "R_" in sym else f"{p:.5f}"
 def get_active_symbols():
-    return ["R_100"]   # TEMP: R_100 only while validating live edge
-
+    # R_100 trades 24/7; XAU/USD only weekdays
+    now = datetime.now(timezone.utc)
+    if now.weekday() >= 5:
+        return ["R_100"]                    # weekend: R_100 only
+    return ["XAU/USD", "R_100"]             # weekday: both
 # ============================== FLASK ==============================
 _flask = Flask("starfx")
 @_flask.route("/")
