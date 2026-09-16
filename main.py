@@ -749,7 +749,10 @@ async def autoscan_once(app):
         chart_path = None
         try:
             chart_path = build_chart(setup)
-            cap = "AUTO " + setup["bias"] + " " + sym + " " + setup["pattern"]
+            cap = (f"AUTO {setup['bias']} {sym} | {setup['pattern']}\n"
+       f"Zone {setup['zone_kind']}  Sweep {setup['sweep']}  TL {setup['tl']}\n"
+       f"H1:{setup['bh1']}  H4:{setup['bh4']}\n"
+       f"Entry {fmt_price(sym, setup['entry'])}  SL {fmt_price(sym, setup['sl'])}  TP {fmt_price(sym, setup['tp'])}  2R  id#{sid}")
             with open(chart_path, "rb") as ph:
                 await app.bot.send_photo(chat_id=TELEGRAM_CHAT_ID, photo=ph, caption=cap)
         except Exception as e:
