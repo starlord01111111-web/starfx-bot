@@ -532,7 +532,7 @@ def db_stats():
         tot = c.execute("SELECT COUNT(*) FROM signals").fetchone()[0]
     return {"total": tot, **dict(rows)}
 
-  def build_chart(setup):
+def build_chart(setup):
     df = setup["df"]
     df_plot = df.tail(90).copy()
     offset = len(df) - len(df_plot)
