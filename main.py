@@ -59,6 +59,30 @@ def _run_flask():
     _flask.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
 Thread(target=_run_flask, daemon=True).start()
 
+# ============================== MODE ==============================
+CURRENT_MODE = "day"
+VALID_MODES = ("day", "scalp", "swing")
+
+async def mode_cmd(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    global CURRENT_MODE
+    args = list(ctx.args or [])
+    if not args:
+        await upd.message.reply_text(
+            f"Current mode: {CURRENT_MODE}\n"
+            f"Usage: /mode day | /mode scalp | /mode swing"
+        )
+        return
+    m = args[0].lower()
+    if m not in VALID_MODES:
+        await upd.message.reply_text(
+            f"Unknown mode. Use: {', '.join(VALID_MODES)}"
+        )
+        return
+    CURRENT_MODE = m
+    await upd.message.reply_text(f"Mode switched to: {CURRENT_MODE.upper()}")
+
+
+
 # ============================== DATA ==============================
 _cache, _cache_lock = {}, Lock()
 CACHE_TTL = 55
@@ -914,6 +938,7 @@ def main():
     app.add_handler(CommandHandler("report", report_cmd))
     app.add_handler(CommandHandler("diag", diag_cmd))
     app.add_handler(CommandHandler("backtest", backtest_cmd))
+    app.add_handler(CommandHandler("mode" , mode_cmd)
     app.add_error_handler(error_handler)
     print("StarFX V15.2 running…")
     app.run_polling(drop_pending_updates=True)
