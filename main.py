@@ -729,14 +729,12 @@ async def signal_cmd(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
         chart_path = None
         try:
             chart_path = build_chart(setup)
-            cap = (f"{setup['bias']} {sym} | {setup['pattern']} | "
-                   f"{setup['mode']} {setup['tf']}\n"
-                   f"Zone {setup['zone_kind']}  Sweep {setup['sweep']}  "
-                   f"TL {setup['tl']}\n"
-                   f"H1:{setup['bh1']}  H4:{setup['bh4']}\n"
-                   f"Entry {fmt_price(sym, setup['entry'])}  "
-                   f"SL {fmt_price(sym, setup['sl'])}  "
-                   f"TP {fmt_price(sym, setup['tp'])}  2R  id#{sid}")
+            side = "BUY" if setup['bias'] == "BULL" else "SELL"
+cap = (f"{side} {sym} | {setup['pattern']} | "
+       f"{setup['mode']} {setup['tf']}\n"
+       f"Zone {setup['zone_kind']}  Sweep {setup['sweep']}  TL {setup['tl']}\n"
+       f"H1:{setup['bh1']}  H4:{setup['bh4']}\n"
+       f"Entry {fmt_price(sym, setup['entry'])}  SL {fmt_price(sym, setup['sl'])}  TP {fmt_price(sym, setup['tp'])}  {setup.get('tp_reason','2R')}  id#{sid}")
             with open(chart_path, "rb") as ph:
                 await ctx.bot.send_photo(chat_id=upd.effective_chat.id,
                                           photo=ph, caption=cap)
@@ -763,7 +761,11 @@ async def autoscan_once(app):
         chart_path = None
         try:
             chart_path = build_chart(setup)
-            cap = (f"AUTO {setup['bias']} {sym} | {setup['pattern']}\n"
+            side = "BUY" if setup['bias'] == "BULL" else "SELL"
+cap = (f"AUTO {side} {sym} | {setup['pattern']}\n"
+       f"Zone {setup['zone_kind']}  Sweep {setup['sweep']}  TL {setup['tl']}\n"
+       f"H1:{setup['bh1']}  H4:{setup['bh4']}\n"
+       f"Entry {fmt_price(sym, setup['entry'])}  SL {fmt_price(sym, setup['sl'])}  TP {fmt_price(sym, setup['tp'])}  {setup.get('tp_reason','2R')}  id#{sid}")
        f"Zone {setup['zone_kind']}  Sweep {setup['sweep']}  TL {setup['tl']}\n"
        f"H1:{setup['bh1']}  H4:{setup['bh4']}\n"
        f"Entry {fmt_price(sym, setup['entry'])}  SL {fmt_price(sym, setup['sl'])}  TP {fmt_price(sym, setup['tp'])}  2R  id#{sid}")
