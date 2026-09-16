@@ -782,7 +782,7 @@ async def autoscan_loop(app):
             print("autoscan:", e)
         await asyncio.sleep(300)
 
-      async def start_cmd(upd, ctx):
+async def start_cmd(upd, ctx):
     txt = "StarFX V16 mode=" + CURRENT_MODE + "\n"
     txt += "Symbols: " + ", ".join(get_active_symbols()) + "\n"
     txt += "/mode day|scalp|swing\n/signal /price /report /diag /backtest"
