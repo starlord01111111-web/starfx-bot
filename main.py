@@ -759,15 +759,20 @@ async def autoscan_once(app):
                 except: pass
 
 async def autoscan_loop(app):
-    print("[autoscan] loop starting")
-    await asyncio.sleep(30)
     while True:
-        print(f"[autoscan] tick {datetime.now(timezone.utc).isoformat()} symbols={get_active_symbols()}")
         try:
-            await autoscan_once(app)
+            print("[autoscan] loop starting")
+            await asyncio.sleep(30)
+            while True:
+                print(f"[autoscan] tick {datetime.now(timezone.utc).isoformat()} symbols={get_active_symbols()}")
+                try:
+                    await autoscan_once(app)
+                except Exception as e:
+                    print(f"[autoscan] inner error: {e}")
+                await asyncio.sleep(300)
         except Exception as e:
-            print(f"[autoscan] error: {e}")
-        await asyncio.sleep(300)
+            print(f"[autoscan] supervisor caught: {e} — restarting in 30s")
+            await asyncio.sleep(30)
                     
 
 
