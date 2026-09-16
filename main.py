@@ -728,24 +728,24 @@ async def signal_cmd(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
         sid = db_save(setup)
         chart_path = None
         try:
-            chart_path = build_chart(setup)
-            side = "BUY" if setup['bias'] == "BULL" else "SELL"
-cap = (f"{side} {sym} | {setup['pattern']} | "
-       f"{setup['mode']} {setup['tf']}\n"
-       f"Zone {setup['zone_kind']}  Sweep {setup['sweep']}  TL {setup['tl']}\n"
-       f"H1:{setup['bh1']}  H4:{setup['bh4']}\n"
-       f"Entry {fmt_price(sym, setup['entry'])}  SL {fmt_price(sym, setup['sl'])}  TP {fmt_price(sym, setup['tp'])}  {setup.get('tp_reason','2R')}  id#{sid}")
-            with open(chart_path, "rb") as ph:
-                await ctx.bot.send_photo(chat_id=upd.effective_chat.id,
-                                          photo=ph, caption=cap)
-        except Exception as e:
-            print("chart err", e)
-            await ctx.bot.send_message(chat_id=upd.effective_chat.id,
-                text=f"{sym} setup #{sid} (chart failed: {e})")
-        finally:
-            if chart_path and os.path.exists(chart_path):
-                try: os.remove(chart_path)
-                except: pass
+    chart_path = build_chart(setup)
+    side = "BUY" if setup['bias'] == "BULL" else "SELL"
+    cap = (f"{side} {sym} | {setup['pattern']} | "
+           f"{setup['mode']} {setup['tf']}\n"
+           f"Zone {setup['zone_kind']}  Sweep {setup['sweep']}  TL {setup['tl']}\n"
+           f"H1:{setup['bh1']}  H4:{setup['bh4']}\n"
+           f"Entry {fmt_price(sym, setup['entry'])}  SL {fmt_price(sym, setup['sl'])}  TP {fmt_price(sym, setup['tp'])}  {setup.get('tp_reason','2R')}  id#{sid}")
+    with open(chart_path, "rb") as ph:
+        await ctx.bot.send_photo(chat_id=upd.effective_chat.id,
+                                  photo=ph, caption=cap)
+except Exception as e:
+    print("chart err", e)
+    await ctx.bot.send_message(chat_id=upd.effective_chat.id,
+        text=f"{sym} setup #{sid} (chart failed: {e})")
+finally:
+    if chart_path and os.path.exists(chart_path):
+        try: os.remove(chart_path)
+        except: pass
     if found == 0:
         await ctx.bot.send_message(chat_id=upd.effective_chat.id,
             text="❌ No qualifying setups right now.\n"
