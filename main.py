@@ -701,6 +701,7 @@ async def price_cmd(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def signal_cmd(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    global last_signal_time
     await upd.message.reply_text("🔍 Scanning…")
     found = 0
     for sym in get_active_symbols():
@@ -737,6 +738,7 @@ async def signal_cmd(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
             text="❌ No qualifying setups right now.\n"
      f"Auto-scanner runs every 5 min. Active: {', '.join(get_active_symbols())}")
 async def autoscan_once(app):
+    global last_signal_time
     for sym in get_active_symbols():
         setup = await evaluate_setup(sym)
         if not setup:
