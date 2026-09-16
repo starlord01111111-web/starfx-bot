@@ -591,7 +591,7 @@ def build_chart(setup):
     fig.savefig(path, dpi=110, bbox_inches="tight", facecolor="#0e1117")
     plt.close(fig); return path
 
-    async def download_history(deriv_sym, gran, months=3):
+async def download_history(deriv_sym, gran, months=3):
     total_needed = months * 30 * 24 * (3600 // gran) + 500
     all_c, end, attempts = [], "latest", 0
     while len(all_c) < total_needed and attempts < 200:
