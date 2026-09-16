@@ -483,7 +483,7 @@ async def evaluate_setup(symbol):
             zdf = await fetch_data(symbol, tf, count=200)
             if zdf is None or len(zdf) < 40: continue
             for z in detect_zones(zdf, 120, single_base=True):
-                                z["tf"] = tf
+                z["tf"] = tf
                 zones.append(z)
         zones = mark_freshness(zones, m30)
         r = evaluate_swing_setup(m30, zones, atr(m30), bh4)
