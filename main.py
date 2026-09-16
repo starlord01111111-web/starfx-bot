@@ -18,7 +18,7 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 # ============================== CONFIG ==============================
-TELEGRAM_TOKEN   = "8656945768:AAGWePpyEbPmn8CYySpJedPOHc6LaNWHpkg"
+TELEGRAM_TOKEN   = "8656945768:AAHGUJbf-ad1Pe57jKqvqp-CjOYPXQfG1iA"
 TELEGRAM_CHAT_ID = "-1004365660319"
 DERIV_APP_ID     = os.environ.get("DERIV_APP_ID", "1089")
 
