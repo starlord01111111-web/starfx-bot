@@ -323,6 +323,7 @@ def evaluate_setup_sync(df, target_bias, atr_val=None, min_bars=60):
             "sweep": sweep["kind"] if sweep else "none",
             "tl": tl_reason, "tl_obj": tl_obj}
 # ============================== LIVE ==============================
+last_signal_time = {}
 async def evaluate_setup(symbol):
     if time.time() - last_signal_time.get(symbol, 0) < COOLDOWN_SEC:
         return None
