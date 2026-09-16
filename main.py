@@ -17,8 +17,8 @@ from flask import Flask
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+TELEGRAM_TOKEN = "8656945768:AAG9pfWjGZoWAaNC9HoiFzwRL_PfgdF2pXo"
+TELEGRAM_CHAT_ID = "-1004365660319"
 DERIV_APP_ID = os.environ.get("DERIV_APP_ID", "1089")
 DB_PATH = os.environ.get("DB_PATH", "signals.db")
 
