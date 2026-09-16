@@ -663,20 +663,34 @@ def _diag_one_symbol(df_m5, df_m15, df_h1, df_h4, symbol):
     return {"symbol": symbol, **c}
 
 # ============================== TRACKER ==============================
-async def tracker_loop():
+async def tracker_loop(app):
     while True:
         try:
             for s in db_open():
                 p = await fetch_price(s["symbol"])
-                if p is None: continue
+                if p is None:
+                    continue
+                hit = None
                 if s["bias"] == "BULL":
-                    if p <= s["sl"]: db_close(s["id"], "SL")
-                    elif p >= s["tp"]: db_close(s["id"], "TP")
+                    if p <= s["sl"]: hit = "SL"
+                    elif p >= s["tp"]: hit = "TP"
                 else:
-                    if p >= s["sl"]: db_close(s["id"], "SL")
-                    elif p <= s["tp"]: db_close(s["id"], "TP")
+                    if p >= s["sl"]: hit = "SL"
+                    elif p <= s["tp"]: hit = "TP"
+                if not hit:
+                    continue
+                db_close(s["id"], hit)
+                emoji = "TP HIT" if hit == "TP" else "SL HIT"
+                txt = (f"{emoji}\n"
+                       f"{s['symbol']} {s['bias']} {s['pattern']}\n"
+                       f"Entry {s['entry']}  SL {s['sl']}  TP {s['tp']}\n"
+                       f"id#{s['id']}  mode {s['mode']}  tf {s['tf']}")
+                try:
+                    await app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=txt)
+                except Exception as e:
+                    print("tracker notify err:", e)
         except Exception as e:
-            print("tracker:", e)
+            print("tracker err:", e)
         await asyncio.sleep(60)
 
 
