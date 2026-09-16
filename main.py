@@ -649,7 +649,7 @@ async def run_backtest(symbols, months, gran_min, progress_cb=None):
         results.append(r)
     return results
 
-  def _bt_symbol(df_full, df5, df15, df30, dfh1, dfh4, symbol, mode):
+def _bt_symbol(df_full, df5, df15, df30, dfh1, dfh4, symbol, mode):
     n = len(df_full)
     a_full = (df_full["high"] - df_full["low"]).rolling(14).mean()
     trades, last_i = [], -999
