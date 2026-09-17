@@ -298,7 +298,7 @@ else:
     sl = float(zone["top"] + atr_val * 0.3); risk = sl - price
 if risk <= 0 or risk > atr_val * 6: return None
 tp = price + RR * risk if target_bias == "BULL" else price - RR * risk
-    return {"bias": target_bias, "pattern": pat["pattern"],
+return {"bias": target_bias, "pattern": pat["pattern"],
             "entry": price, "sl": sl, "tp": tp, "atr": float(atr_val),
             "zone_kind": zone["kind"], "zone_tf": zone.get("tf", "H1"),
             "sweep": sweep["kind"] if sweep else "none",
