@@ -620,8 +620,7 @@ def _prepare(df_m):
     idx = df.set_index("epoch")
     def rs(rule):
         return (idx.resample(rule).agg({"open":"first","high":"max","low":"min","close":"last"}).dropna().reset_index())
-    return df, rs("5min"), rs("15min"), rs("30min"), rs("1h"), rs("4h")
-
+    return rs("5min"), rs("15min"), rs("30min"), rs("1h"), rs("4h")
 def simulate_trade(df, i, bias, sl, tp, max_bars=300):
     for j in range(i+1, min(i+max_bars, len(df))):
         b = df.iloc[j]
