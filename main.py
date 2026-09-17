@@ -292,12 +292,11 @@ def evaluate_setup_sync(df_m5, zones_htf, target_bias, atr_val):
             tl_ok = True; tl_reason = "TL_supply"
         elif tl_l and tl_break(tl_l, df, idx):
             tl_ok = True; tl_reason = "TL_break_dn"
-    last_c = df.iloc[-1]
     if target_bias == "BULL":
-        sl = float(last_c["low"] - atr_val * 0.5); risk = price - sl
-    else:
-        sl = float(last_c["high"] + atr_val * 0.5); risk = sl - price
-    if risk <= 0 or risk > atr_val * 2.5: return None
+    sl = float(zone["bot"] - atr_val * 0.3); risk = price - sl
+else:
+    sl = float(zone["top"] + atr_val * 0.3); risk = sl - price
+if risk <= 0 or risk > atr_val * 6: return None
     tp = price + RR * risk if target_bias == "BULL" else price - RR * risk
     return {"bias": target_bias, "pattern": pat["pattern"],
             "entry": price, "sl": sl, "tp": tp, "atr": float(atr_val),
