@@ -292,19 +292,18 @@ def evaluate_setup_sync(df_m5, zones_htf, target_bias, atr_val):
             tl_ok = True; tl_reason = "TL_supply"
         elif tl_l and tl_break(tl_l, df, idx):
             tl_ok = True; tl_reason = "TL_break_dn"
-if target_bias == "BULL":
-    sl = float(zone["bot"] - atr_val * 0.3); risk = price - sl
-else:
-    sl = float(zone["top"] + atr_val * 0.3); risk = sl - price
-if risk <= 0 or risk > atr_val * 6: return None
-tp = price + RR * risk if target_bias == "BULL" else price - RR * risk
-return {"bias": target_bias, "pattern": pat["pattern"],
+    if target_bias == "BULL":
+        sl = float(zone["bot"] - atr_val * 0.3); risk = price - sl
+    else:
+        sl = float(zone["top"] + atr_val * 0.3); risk = sl - price
+    if risk <= 0 or risk > atr_val * 6: return None
+    tp = price + RR * risk if target_bias == "BULL" else price - RR * risk
+    return {"bias": target_bias, "pattern": pat["pattern"],
             "entry": price, "sl": sl, "tp": tp, "atr": float(atr_val),
             "zone_kind": zone["kind"], "zone_tf": zone.get("tf", "H1"),
             "sweep": sweep["kind"] if sweep else "none",
             "tl": tl_reason if tl_ok else "none",
             "df": df}
-
 async def evaluate_setup(symbol):
     m5 = await fetch_data(symbol, "M5")
     h1 = await fetch_data(symbol, "H1")
